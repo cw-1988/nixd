@@ -1,5 +1,6 @@
 #include "nixd/Controller/Option.h"
 #include "AST.h"
+#include "OptionInteger.h"
 
 #include <cctype>
 #include <sstream>
@@ -35,15 +36,19 @@ void markAccepted(ParsedOptionType &Parsed, OptionLiteralKind Kind) {
   Parsed.Coverage = OptionTypeCoverage::Complete;
 }
 
+std::string_view trimOuterParens(std::string_view S) {
+  if (S.size() < 2 || S.front() != '(' || S.back() != ')')
+    return S;
+  return S.substr(1, S.size() - 2);
+}
+
 void classifyByName(std::string_view Name, ParsedOptionType &Parsed) {
   if (Name == "bool" || Name == "boolean") {
     markAccepted(Parsed, OptionLiteralKind::Bool);
     return;
   }
-  if (Name == "int" || Name == "integer" || Name == "signedint") {
-    markAccepted(Parsed, OptionLiteralKind::Int);
+  if (option_integer::classifyByName(Name, Parsed))
     return;
-  }
   if (Name == "float") {
     markAccepted(Parsed, OptionLiteralKind::Float);
     return;
@@ -57,11 +62,12 @@ void classifyByName(std::string_view Name, ParsedOptionType &Parsed) {
     markAccepted(Parsed, OptionLiteralKind::Path);
     return;
   }
-  if (Name == "attrs" || Name == "attrset") {
+  if (Name == "attrs" || Name == "attrset" || Name == "attrsof" ||
+      Name == "attrswith" || Name == "submodule" || Name == "submodulewith") {
     markAccepted(Parsed, OptionLiteralKind::AttrSet);
     return;
   }
-  if (Name == "list") {
+  if (Name == "list" || Name == "listof") {
     markAccepted(Parsed, OptionLiteralKind::List);
     return;
   }
@@ -69,11 +75,11 @@ void classifyByName(std::string_view Name, ParsedOptionType &Parsed) {
 
 void classifyByStableDescription(std::string_view Description,
                                  ParsedOptionType &Parsed) {
-  const std::string Lower = toLowerCopy(Description);
+  const std::string LowerStorage = toLowerCopy(Description);
+  std::string_view Lower = trimOuterParens(LowerStorage);
   if (Lower == "boolean" || Lower == "boolean value")
     markAccepted(Parsed, OptionLiteralKind::Bool);
-  if (Lower == "signed integer")
-    markAccepted(Parsed, OptionLiteralKind::Int);
+  option_integer::classifyByStableDescription(Lower, Parsed);
   if (Lower == "floating point number")
     markAccepted(Parsed, OptionLiteralKind::Float);
   if (Lower == "string")
@@ -85,6 +91,12 @@ void classifyByStableDescription(std::string_view Description,
     Parsed.AcceptsAbsolutePathString = true;
   }
   if (Lower == "attribute set")
+    markAccepted(Parsed, OptionLiteralKind::AttrSet);
+  if (Lower.starts_with("attribute set of "))
+    markAccepted(Parsed, OptionLiteralKind::AttrSet);
+  if (Lower.starts_with("list of "))
+    markAccepted(Parsed, OptionLiteralKind::List);
+  if (Lower == "submodule")
     markAccepted(Parsed, OptionLiteralKind::AttrSet);
 }
 
@@ -124,6 +136,7 @@ std::optional<ParsedOptionType> nixd::parseOptionType(const OptionType &Type) {
 
   if (Type.Description) {
     const std::string LowerDescription = toLowerCopy(*Type.Description);
+    option_integer::refineFromDescription(Name, LowerDescription, Parsed);
     if (Name == "nullor" && LowerDescription.starts_with("null or "))
       classifyByStableDescription(LowerDescription.substr(8), Parsed);
     else if (Name.empty())
@@ -146,6 +159,9 @@ OptionLiteralKind nixd::classifyOptionLiteral(const Expr &Value) {
   }
   case NK::NK_ExprInt:
     return OptionLiteralKind::Int;
+  case NK::NK_ExprUnaryOp:
+    return option_integer::constantValue(Value) ? OptionLiteralKind::Int
+                                                : OptionLiteralKind::Unknown;
   case NK::NK_ExprFloat:
     return OptionLiteralKind::Float;
   case NK::NK_ExprString: {
@@ -180,8 +196,11 @@ OptionValueMatch nixd::optionValueMatch(const ParsedOptionType &Expected,
       Actual == OptionLiteralKind::Unknown)
     return OptionValueMatch::Unknown;
 
-  if (Expected.accepts(Actual))
+  if (Expected.accepts(Actual)) {
+    if (Actual == OptionLiteralKind::Int)
+      return option_integer::matchConstraint(Expected, Value);
     return OptionValueMatch::Matches;
+  }
 
   if (Actual == OptionLiteralKind::String &&
       Expected.accepts(OptionLiteralKind::Path)) {

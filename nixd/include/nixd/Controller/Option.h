@@ -41,10 +41,16 @@ enum class OptionValueMatch : std::uint8_t {
   Unknown,
 };
 
+struct OptionIntegerConstraint {
+  std::optional<std::int64_t> Min;
+  std::optional<std::int64_t> Max;
+};
+
 struct ParsedOptionType {
   OptionTypeCoverage Coverage = OptionTypeCoverage::Unknown;
   bool AllowNull = false;
   bool AcceptsAbsolutePathString = false;
+  std::optional<OptionIntegerConstraint> IntegerConstraint;
   std::set<OptionLiteralKind> Accepted;
   std::string Rendered;
 

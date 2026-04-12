@@ -37,6 +37,7 @@ libnixd_lib = library(
     'Controller/LifeTime.cpp',
     'Controller/NixTU.cpp',
     'Controller/Option.cpp',
+    'Controller/OptionInteger.cpp',
     'Controller/OptionDiagnostics.cpp',
     'Controller/OptionProviders.cpp',
     'Controller/Rename.cpp',

@@ -154,14 +154,14 @@ nix::Value getSubOptions(nix::EvalState &State, nix::Value &Type) {
   return VResult;
 }
 
-} // namespace
-
-nix::Value nixt::selectOptions(nix::EvalState &State, nix::Value &V,
-                               std::vector<nix::Symbol>::const_iterator Begin,
-                               std::vector<nix::Symbol>::const_iterator End) {
-  // Always try to mangle the value if it is a submodule
-  if (nix::Value *SubType = tryGetSubmoduleType(State, V))
-    // Invoke getSubOptions on that type, and reset the value to it.
+nix::Value selectOptionsImpl(nix::EvalState &State, nix::Value &V,
+                             std::vector<nix::Symbol>::const_iterator Begin,
+                             std::vector<nix::Symbol>::const_iterator End,
+                             bool ResolveFinalSubmodule) {
+  // Dive into submodules while walking a path. Option-info callers keep the
+  // final submodule option intact so its own type metadata remains visible.
+  if (nix::Value *SubType = tryGetSubmoduleType(State, V);
+      (Begin != End || ResolveFinalSubmodule) && SubType)
     V = getSubOptions(State, *SubType);
 
   if (Begin == End)
@@ -183,12 +183,28 @@ nix::Value nixt::selectOptions(nix::EvalState &State, nix::Value &V,
 
       if (isTypeSubmodule(State, ElemType)) {
         nix::Value ElemOptions = getSubOptions(State, ElemType);
-        return selectOptions(State, ElemOptions, ++Begin, End);
+        return selectOptionsImpl(State, ElemOptions, ++Begin, End,
+                                 ResolveFinalSubmodule);
       }
     }
   }
 
   // Otherwise, simply select it.
   nix::Value &Nested = selectAttr(State, V, *Begin);
-  return selectOptions(State, Nested, ++Begin, End);
+  return selectOptionsImpl(State, Nested, ++Begin, End, ResolveFinalSubmodule);
+}
+
+} // namespace
+
+nix::Value nixt::selectOptions(nix::EvalState &State, nix::Value &V,
+                               std::vector<nix::Symbol>::const_iterator Begin,
+                               std::vector<nix::Symbol>::const_iterator End) {
+  return selectOptionsImpl(State, V, Begin, End, true);
+}
+
+nix::Value
+nixt::selectOptionInfo(nix::EvalState &State, nix::Value &V,
+                       std::vector<nix::Symbol>::const_iterator Begin,
+                       std::vector<nix::Symbol>::const_iterator End) {
+  return selectOptionsImpl(State, V, Begin, End, false);
 }

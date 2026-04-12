@@ -303,7 +303,7 @@ void AttrSetProvider::onOptionInfo(
       return;
     }
 
-    nix::Value Option = nixt::selectOptions(
+    nix::Value Option = nixt::selectOptionInfo(
         state(), Nixpkgs, nixt::toSymbols(state().symbols, AttrPath));
 
     OptionInfoResponse R;

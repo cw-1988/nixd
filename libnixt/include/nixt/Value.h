@@ -46,9 +46,19 @@ nix::Value selectOptions(nix::EvalState &State, nix::Value &V,
                          std::vector<nix::Symbol>::const_iterator Begin,
                          std::vector<nix::Symbol>::const_iterator End);
 
+/// \brief Select one exact option, diving into intermediate submodules only.
+nix::Value selectOptionInfo(nix::EvalState &State, nix::Value &V,
+                            std::vector<nix::Symbol>::const_iterator Begin,
+                            std::vector<nix::Symbol>::const_iterator End);
+
 inline nix::Value selectOptions(nix::EvalState &State, nix::Value &V,
                                 const std::vector<nix::Symbol> &AttrPath) {
   return selectOptions(State, V, AttrPath.begin(), AttrPath.end());
+}
+
+inline nix::Value selectOptionInfo(nix::EvalState &State, nix::Value &V,
+                                   const std::vector<nix::Symbol> &AttrPath) {
+  return selectOptionInfo(State, V, AttrPath.begin(), AttrPath.end());
 }
 
 /// \copydoc selectAttrPath

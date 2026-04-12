@@ -29,8 +29,8 @@
 ```
 
 ```
-CHECK: "id": 0
-CHECK-NOT: option-value-type
+CHECK: "message": "value for option `services.example.port` has type `string`, expected `positiveInt`"
+CHECK: "message": "value for option `services.example.items` has type `string`, expected `listOf list of signed integer`"
 ```
 
 ```json
