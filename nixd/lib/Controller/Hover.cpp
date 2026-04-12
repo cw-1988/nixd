@@ -238,33 +238,26 @@ void Controller::onHover(const TextDocumentPositionParams &Params,
           auto Scope = std::vector<std::string>();
           const auto R = findAttrPathForOptions(N, PM, Scope);
           if (R == FindAttrPathResult::OK) {
-            std::lock_guard _(OptionsLock);
-            for (const auto &[_, Client] : Options) {
-              if (AttrSetClient *C = Client->client()) {
-                OptionsHoverProvider OHP(*C);
-                std::optional<OptionDescription> Desc = OHP.resolveHover(Scope);
-                std::string Docs;
-                if (Desc) {
-                  if (Desc->Type) {
-                    std::string TypeName = Desc->Type->Name.value_or("");
-                    std::string TypeDesc = Desc->Type->Description.value_or("");
-                    Docs += llvm::formatv("{0} ({1})", TypeName, TypeDesc);
-                  } else {
-                    Docs += "? (missing type)";
-                  }
-                  if (Desc->Description) {
-                    Docs += "\n\n" + Desc->Description.value_or("");
-                  }
-                  return Hover{
-                      .contents =
-                          MarkupContent{
-                              .kind = MarkupKind::Markdown,
-                              .value = std::move(Docs),
-                          },
-                      .range = toLSPRange(TU->src(), N.range()),
-                  };
-                }
+            for (const ResolvedOptionInfo &Info : resolveOptionInfos(Scope)) {
+              const OptionDescription &Desc = Info.Description;
+              std::string Docs;
+              if (Desc.Type) {
+                std::string TypeName = Desc.Type->Name.value_or("");
+                std::string TypeDesc = Desc.Type->Description.value_or("");
+                Docs += llvm::formatv("{0} ({1})", TypeName, TypeDesc);
+              } else {
+                Docs += "? (missing type)";
               }
+              if (Desc.Description)
+                Docs += "\n\n" + Desc.Description.value_or("");
+              return Hover{
+                  .contents =
+                      MarkupContent{
+                          .kind = MarkupKind::Markdown,
+                          .value = std::move(Docs),
+                      },
+                  .range = toLSPRange(TU->src(), N.range()),
+              };
             }
           }
           break;

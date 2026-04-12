@@ -54,37 +54,56 @@ void Controller::onDidChangeConfiguration(
 }
 
 void Controller::updateConfig(Configuration NewConfig) {
-  std::lock_guard G(ConfigLock);
-  Config = std::move(NewConfig);
+  Configuration ActiveConfig;
+  {
+    std::lock_guard G(ConfigLock);
+    Config = std::move(NewConfig);
+    ActiveConfig = Config;
+  }
 
-  if (!Config.nixpkgs.expr.empty()) {
+  if (!ActiveConfig.nixpkgs.expr.empty()) {
     /// Evaluate nixpkgs and options, using user-provided config.
     if (nixpkgsClient()) {
-      evalExprWithProgress(*nixpkgsClient(), Config.nixpkgs.expr,
+      evalExprWithProgress(*nixpkgsClient(), ActiveConfig.nixpkgs.expr,
                            "nixpkgs entries");
     }
   }
-  if (!Config.options.empty()) {
-    std::lock_guard _(OptionsLock);
+  if (!ActiveConfig.options.empty()) {
     // For each option configuration, update the worker.
-    for (const auto &[Name, Opt] : Config.options) {
-      auto &Client = Options[Name];
-      if (!Client) {
-        // If it does not exist. Launch a new client.
-        startOption(Name, Client);
+    for (const auto &[Name, Opt] : ActiveConfig.options) {
+      AttrSetClient *Client = nullptr;
+      {
+        std::lock_guard _(OptionsLock);
+        auto &Proc = Options[Name];
+        if (!Proc) {
+          // If it does not exist. Launch a new client.
+          startOption(Name, Proc);
+        }
+        assert(Proc);
+        Client = Proc->client();
       }
-      assert(Client);
-      evalExprWithProgress(*Client->client(), Opt.expr, Name);
+      OptService.invalidateProvider(Name);
+      if (Client)
+        evalExprWithProgress(*Client, Opt.expr, Name, [this, Name]() {
+          noteOptionProviderChanged(Name);
+        });
     }
   }
 
   // Update the diagnostic part.
-  updateSuppressed(Config.diagnostic.suppress);
+  updateSuppressed(ActiveConfig.diagnostic.suppress);
 
   // After all, notify all AST modules the diagnostic set has been updated.
-  std::lock_guard TUsGuard(TUsLock);
-  for (const auto &[File, TU] : TUs) {
-    publishDiagnostics(File, std::nullopt, TU->src(), TU->diagnostics());
+  std::vector<std::pair<std::string, std::shared_ptr<NixTU>>> Snapshot;
+  {
+    std::lock_guard TUsGuard(TUsLock);
+    Snapshot.reserve(TUs.size());
+    for (const auto &[File, TU] : TUs)
+      Snapshot.emplace_back(File.str(), TU);
+  }
+  for (const auto &[File, TU] : Snapshot) {
+    publishDiagnostics(File, std::nullopt, TU->src(), TU->diagnostics(),
+                       TU->nixdDiagnostics());
   }
 }
 

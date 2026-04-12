@@ -3,6 +3,7 @@
 #include "Configuration.h"
 #include "EvalClient.h"
 #include "NixTU.h"
+#include "Option.h"
 
 #include "lspserver/DraftStore.h"
 #include "lspserver/LSPServer.h"
@@ -12,6 +13,7 @@
 
 #include <boost/asio/thread_pool.hpp>
 
+#include <cstdint>
 #include <set>
 
 namespace nixd {
@@ -27,6 +29,10 @@ private:
   std::unique_ptr<AttrSetClientProc> NixpkgsEval;
 
   std::mutex OptionsLock;
+  OptionService OptService;
+  std::map<std::string, std::uint64_t>
+      OptionGenerations;                  // GUARDED_BY(OptionsLock)
+  std::uint64_t NextOptionGeneration = 1; // GUARDED_BY(OptionsLock)
   // Map of option providers.
   //
   // e.g. "nixos" -> nixos worker
@@ -41,7 +47,8 @@ private:
   AttrSetClient *nixpkgsClient() { return nixpkgsEval().client(); }
 
   void evalExprWithProgress(AttrSetClient &Client, const EvalExprParams &Params,
-                            std::string_view Description);
+                            std::string_view Description,
+                            llvm::unique_function<void()> OnSuccess = nullptr);
 
   lspserver::DraftStore Store;
 
@@ -223,6 +230,8 @@ private:
       SuppressedDiagnostics; // GUARDED_BY(SuppressedDiagnosticsLock)
 
   std::mutex SuppressedDiagnosticsLock;
+  std::set<std::string>
+      SuppressedNixdDiagnostics; // GUARDED_BY(SuppressedDiagnosticsLock)
 
   /// Update the suppressing set. There might be some invalid names, should be
   /// logged then.
@@ -230,9 +239,26 @@ private:
 
   /// Determine whether or not this diagnostic is suppressed.
   bool isSuppressed(nixf::Diagnostic::DiagnosticKind Kind);
-  void publishDiagnostics(lspserver::PathRef File,
-                          std::optional<int64_t> Version, std::string_view Src,
-                          const std::vector<nixf::Diagnostic> &Diagnostics);
+  bool isNixdDiagnosticSuppressed(std::string_view Code);
+  void noteOptionProviderChanged(std::string_view Name);
+  std::vector<OptionProviderRef> optionProviderSnapshot();
+  std::vector<ResolvedOptionField>
+  completeOptions(const std::vector<std::string> &Scope,
+                  const std::string &Prefix);
+  std::vector<ResolvedOptionInfo>
+  resolveOptionInfos(const std::vector<std::string> &Scope);
+  std::vector<lspserver::Location>
+  optionDeclarationLocations(const std::vector<std::string> &Scope);
+  std::vector<NixdDiagnostic> collectOptionDiagnostics(const NixTU &TU);
+  void scheduleOptionDiagnostics(lspserver::PathRef File,
+                                 std::optional<int64_t> Version,
+                                 std::shared_ptr<NixTU> TU);
+  void refreshDiagnostics();
+  void
+  publishDiagnostics(lspserver::PathRef File, std::optional<int64_t> Version,
+                     std::string_view Src,
+                     const std::vector<nixf::Diagnostic> &Diagnostics,
+                     const std::vector<NixdDiagnostic> &NixdDiagnostics = {});
 
   void onRename(const lspserver::RenameParams &Params,
                 lspserver::Callback<lspserver::WorkspaceEdit> Reply);

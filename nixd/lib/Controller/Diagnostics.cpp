@@ -21,6 +21,7 @@ void Controller::updateSuppressed(const std::vector<std::string> &Sup) {
   std::lock_guard _(SuppressedDiagnosticsLock);
   // Clear the set, just construct a new one.
   SuppressedDiagnostics.clear();
+  SuppressedNixdDiagnostics.clear();
 
   // For each element, see if the name matches some declared name.
   // If so, insert the set.
@@ -28,8 +29,7 @@ void Controller::updateSuppressed(const std::vector<std::string> &Sup) {
     if (auto DK = nixf::Diagnostic::parseKind(Name)) {
       SuppressedDiagnostics.insert(*DK);
     } else {
-      // The name is not listed in knwon names. Log error here
-      lspserver::elog("diagnostic suppressing sname {0} is unknown", Name);
+      SuppressedNixdDiagnostics.insert(Name);
     }
   }
 }
@@ -39,11 +39,17 @@ bool Controller::isSuppressed(nixf::Diagnostic::DiagnosticKind Kind) {
   return SuppressedDiagnostics.contains(Kind);
 }
 
+bool Controller::isNixdDiagnosticSuppressed(std::string_view Code) {
+  std::lock_guard _(SuppressedDiagnosticsLock);
+  return SuppressedNixdDiagnostics.contains(std::string(Code));
+}
+
 void Controller::publishDiagnostics(
     PathRef File, std::optional<int64_t> Version, std::string_view Src,
-    const std::vector<nixf::Diagnostic> &Diagnostics) {
+    const std::vector<nixf::Diagnostic> &Diagnostics,
+    const std::vector<NixdDiagnostic> &NixdDiagnostics) {
   std::vector<Diagnostic> LSPDiags;
-  LSPDiags.reserve(Diagnostics.size());
+  LSPDiags.reserve(Diagnostics.size() + NixdDiagnostics.size());
   for (const nixf::Diagnostic &D : Diagnostics) {
     // Before actually doing anything,
     // let's check if the diagnostic is suppressed.
@@ -111,6 +117,17 @@ void Controller::publishDiagnostics(
                   }},
       });
     }
+  }
+  for (const NixdDiagnostic &D : NixdDiagnostics) {
+    if (isNixdDiagnosticSuppressed(D.Code))
+      continue;
+    LSPDiags.emplace_back(Diagnostic{
+        .range = toLSPRange(Src, D.Range),
+        .severity = static_cast<int>(D.Severity),
+        .code = D.Code,
+        .source = D.Source,
+        .message = D.Message,
+    });
   }
   PublishDiagnostic({
       .uri = URIForFile::canonicalize(File, File),

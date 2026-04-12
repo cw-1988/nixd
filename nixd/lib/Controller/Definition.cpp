@@ -204,36 +204,6 @@ public:
   }
 };
 
-/// \brief Try to get "location" by invoking options worker
-class OptionsDefinitionProvider {
-  AttrSetClient &Client;
-
-public:
-  OptionsDefinitionProvider(AttrSetClient &Client) : Client(Client) {}
-  void resolveLocations(const std::vector<std::string> &Params,
-                        Locations &Locs) {
-    std::binary_semaphore Ready(0);
-    Expected<OptionInfoResponse> Info = error("not replied");
-    OptionCompleteResponse Names;
-    auto OnReply = [&Ready, &Info](llvm::Expected<OptionInfoResponse> Resp) {
-      Info = std::move(Resp);
-      Ready.release();
-    };
-    // Send request.
-
-    Client.optionInfo(Params, std::move(OnReply));
-    Ready.acquire();
-
-    if (!Info) {
-      elog("getting locations: {0}", Info.takeError());
-      return;
-    }
-
-    for (const auto &Decl : Info->Declarations)
-      Locs.emplace_back(Decl);
-  }
-};
-
 /// \brief Resolve expr path to "real" path, returning a location.
 ///
 /// This enables "go to definition" for path literals like ./foo.nix.
@@ -253,27 +223,14 @@ std::optional<Location> definePath(const ExprPath &Path,
   return std::nullopt;
 }
 
-/// \brief Get the locations of some attribute path.
-///
-/// Usually this function will return a list of option declarations via RPC
-Locations defineAttrPath(const Node &N, const ParentMapAnalysis &PM,
-                         std::mutex &OptionsLock,
-                         Controller::OptionMapTy &Options) {
+std::optional<std::vector<std::string>>
+optionAttrPathScope(const Node &N, const ParentMapAnalysis &PM) {
   using PathResult = FindAttrPathResult;
   std::vector<std::string> Scope;
   auto R = findAttrPathForOptions(N, PM, Scope);
-  Locations Locs;
-  if (R == PathResult::OK) {
-    std::lock_guard _(OptionsLock);
-    // For each option worker, try to get it's decl position.
-    for (const auto &[_, Client] : Options) {
-      if (AttrSetClient *C = Client->client()) {
-        OptionsDefinitionProvider ODP(*C);
-        ODP.resolveLocations(Scope, Locs);
-      }
-    }
-  }
-  return Locs;
+  if (R != PathResult::OK)
+    return std::nullopt;
+  return Scope;
 }
 
 /// \brief Get nixpkgs definition from a selector.
@@ -404,7 +361,10 @@ void Controller::onDefinition(const TextDocumentPositionParams &Params,
         return defineSelect(Sel, VLA, PM, *nixpkgsClient());
       }
       case Node::NK_ExprAttrs:
-        return defineAttrPath(N, PM, OptionsLock, Options);
+        if (std::optional<std::vector<std::string>> Scope =
+                optionAttrPathScope(N, PM))
+          return optionDeclarationLocations(*Scope);
+        return Locations{};
       case Node::NK_ExprPath: {
         const auto &Path = static_cast<const ExprPath &>(UpExpr);
         if (auto Loc = definePath(Path, File))

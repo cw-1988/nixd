@@ -1,0 +1,257 @@
+#include "nixd/Controller/Option.h"
+#include "AST.h"
+
+#include <cctype>
+#include <sstream>
+
+using namespace nixd;
+using namespace nixf;
+
+namespace {
+
+std::string toLowerCopy(std::string_view S) {
+  std::string Lower;
+  Lower.reserve(S.size());
+  for (char C : S)
+    Lower.push_back(
+        static_cast<char>(std::tolower(static_cast<unsigned char>(C))));
+  return Lower;
+}
+
+std::string renderOptionType(const OptionType &Type) {
+  std::ostringstream OS;
+  if (Type.Name)
+    OS << *Type.Name;
+  if (Type.Description) {
+    if (OS.tellp() > 0)
+      OS << " ";
+    OS << *Type.Description;
+  }
+  return OS.str();
+}
+
+void markAccepted(ParsedOptionType &Parsed, OptionLiteralKind Kind) {
+  Parsed.Accepted.insert(Kind);
+  Parsed.Coverage = OptionTypeCoverage::Complete;
+}
+
+void classifyByName(std::string_view Name, ParsedOptionType &Parsed) {
+  if (Name == "bool" || Name == "boolean") {
+    markAccepted(Parsed, OptionLiteralKind::Bool);
+    return;
+  }
+  if (Name == "int" || Name == "integer" || Name == "signedint") {
+    markAccepted(Parsed, OptionLiteralKind::Int);
+    return;
+  }
+  if (Name == "float") {
+    markAccepted(Parsed, OptionLiteralKind::Float);
+    return;
+  }
+  if (Name == "str" || Name == "string" || Name == "lines" ||
+      Name == "separatedstring") {
+    markAccepted(Parsed, OptionLiteralKind::String);
+    return;
+  }
+  if (Name == "path") {
+    markAccepted(Parsed, OptionLiteralKind::Path);
+    return;
+  }
+  if (Name == "attrs" || Name == "attrset") {
+    markAccepted(Parsed, OptionLiteralKind::AttrSet);
+    return;
+  }
+  if (Name == "list") {
+    markAccepted(Parsed, OptionLiteralKind::List);
+    return;
+  }
+}
+
+void classifyByStableDescription(std::string_view Description,
+                                 ParsedOptionType &Parsed) {
+  const std::string Lower = toLowerCopy(Description);
+  if (Lower == "boolean" || Lower == "boolean value")
+    markAccepted(Parsed, OptionLiteralKind::Bool);
+  if (Lower == "signed integer")
+    markAccepted(Parsed, OptionLiteralKind::Int);
+  if (Lower == "floating point number")
+    markAccepted(Parsed, OptionLiteralKind::Float);
+  if (Lower == "string")
+    markAccepted(Parsed, OptionLiteralKind::String);
+  if (Lower == "path")
+    markAccepted(Parsed, OptionLiteralKind::Path);
+  if (Lower == "absolute path") {
+    markAccepted(Parsed, OptionLiteralKind::Path);
+    Parsed.AcceptsAbsolutePathString = true;
+  }
+  if (Lower == "attribute set")
+    markAccepted(Parsed, OptionLiteralKind::AttrSet);
+}
+
+bool isAbsolutePathString(const Expr &Value) {
+  if (Value.kind() != Node::NK_ExprString)
+    return false;
+  const auto &String = static_cast<const ExprString &>(Value);
+  return String.isLiteral() && String.literal().starts_with("/");
+}
+
+bool isStaticString(const ExprString &String) {
+  return String.isLiteral() || String.parts().fragments().empty();
+}
+
+} // namespace
+
+bool ParsedOptionType::accepts(OptionLiteralKind Kind) const {
+  return (Kind == OptionLiteralKind::Null && AllowNull) ||
+         Accepted.contains(Kind);
+}
+
+bool ParsedOptionType::acceptsBoolean() const {
+  return Accepted.contains(OptionLiteralKind::Bool);
+}
+
+std::optional<ParsedOptionType> nixd::parseOptionType(const OptionType &Type) {
+  ParsedOptionType Parsed;
+  Parsed.Rendered = renderOptionType(Type);
+  if (Parsed.Rendered.empty())
+    return std::nullopt;
+
+  const std::string Name = Type.Name ? toLowerCopy(*Type.Name) : "";
+  Parsed.AllowNull = Name == "nullor";
+  if (Parsed.AllowNull)
+    Parsed.Coverage = OptionTypeCoverage::Partial;
+  classifyByName(Name, Parsed);
+
+  if (Type.Description) {
+    const std::string LowerDescription = toLowerCopy(*Type.Description);
+    if (Name == "nullor" && LowerDescription.starts_with("null or "))
+      classifyByStableDescription(LowerDescription.substr(8), Parsed);
+    else if (Name.empty())
+      classifyByStableDescription(LowerDescription, Parsed);
+  }
+
+  if (Parsed.Coverage != OptionTypeCoverage::Complete)
+    return std::nullopt;
+  return Parsed;
+}
+
+OptionLiteralKind nixd::classifyOptionLiteral(const Expr &Value) {
+  using NK = Node::NodeKind;
+  switch (Value.kind()) {
+  case NK::NK_ExprParen: {
+    const auto &Paren = static_cast<const ExprParen &>(Value);
+    if (const nixf::Expr *Inner = Paren.expr())
+      return classifyOptionLiteral(*Inner);
+    return OptionLiteralKind::Unknown;
+  }
+  case NK::NK_ExprInt:
+    return OptionLiteralKind::Int;
+  case NK::NK_ExprFloat:
+    return OptionLiteralKind::Float;
+  case NK::NK_ExprString: {
+    const auto &String = static_cast<const ExprString &>(Value);
+    return isStaticString(String) ? OptionLiteralKind::String
+                                  : OptionLiteralKind::Unknown;
+  }
+  case NK::NK_ExprPath:
+  case NK::NK_ExprSPath:
+    return OptionLiteralKind::Path;
+  case NK::NK_ExprList:
+    return OptionLiteralKind::List;
+  case NK::NK_ExprAttrs:
+    return OptionLiteralKind::AttrSet;
+  case NK::NK_ExprVar: {
+    const auto &Var = static_cast<const ExprVar &>(Value);
+    if (Var.id().name() == "null")
+      return OptionLiteralKind::Null;
+    if (Var.id().name() == "true" || Var.id().name() == "false")
+      return OptionLiteralKind::Bool;
+    return OptionLiteralKind::Unknown;
+  }
+  default:
+    return OptionLiteralKind::Unknown;
+  }
+}
+
+OptionValueMatch nixd::optionValueMatch(const ParsedOptionType &Expected,
+                                        const Expr &Value,
+                                        OptionLiteralKind Actual) {
+  if (Expected.Coverage != OptionTypeCoverage::Complete ||
+      Actual == OptionLiteralKind::Unknown)
+    return OptionValueMatch::Unknown;
+
+  if (Expected.accepts(Actual))
+    return OptionValueMatch::Matches;
+
+  if (Actual == OptionLiteralKind::String &&
+      Expected.accepts(OptionLiteralKind::Path)) {
+    if (!Expected.AcceptsAbsolutePathString)
+      return OptionValueMatch::Unknown;
+    return isAbsolutePathString(Value) ? OptionValueMatch::Matches
+                                       : OptionValueMatch::Mismatches;
+  }
+
+  return OptionValueMatch::Mismatches;
+}
+
+std::string nixd::optionLiteralKindName(OptionLiteralKind Kind) {
+  switch (Kind) {
+  case OptionLiteralKind::Null:
+    return "null";
+  case OptionLiteralKind::Bool:
+    return "boolean";
+  case OptionLiteralKind::Int:
+    return "integer";
+  case OptionLiteralKind::Float:
+    return "float";
+  case OptionLiteralKind::String:
+    return "string";
+  case OptionLiteralKind::Path:
+    return "path";
+  case OptionLiteralKind::List:
+    return "list";
+  case OptionLiteralKind::AttrSet:
+    return "attribute set";
+  default:
+    return "unknown";
+  }
+}
+
+std::optional<std::vector<std::string>>
+nixd::findOptionBindingScope(const Binding &Binding,
+                             const ParentMapAnalysis &PM) {
+  const auto &Names = Binding.path().names();
+  if (Names.empty())
+    return std::nullopt;
+
+  std::vector<std::string> Scope;
+  if (findAttrPathForOptions(*Names.back(), PM, Scope) !=
+          FindAttrPathResult::OK ||
+      Scope.empty())
+    return std::nullopt;
+  return Scope;
+}
+
+std::optional<OptionValueContext>
+nixd::findOptionValueContext(const Node &Desc, const ParentMapAnalysis &PM,
+                             Position Pos) {
+  const nixf::Node *BindingNode = PM.upTo(Desc, nixf::Node::NK_Binding);
+  if (!BindingNode)
+    return std::nullopt;
+
+  const auto &Binding = static_cast<const nixf::Binding &>(*BindingNode);
+  if (!Binding.eq())
+    return std::nullopt;
+
+  if (Pos < Binding.eq()->rCur().position())
+    return std::nullopt;
+  if (Binding.value() && Binding.value()->rCur().position() < Pos)
+    return std::nullopt;
+
+  std::optional<std::vector<std::string>> Scope =
+      findOptionBindingScope(Binding, PM);
+  if (!Scope)
+    return std::nullopt;
+
+  return OptionValueContext{.Binding = &Binding, .Scope = std::move(*Scope)};
+}

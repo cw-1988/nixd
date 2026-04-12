@@ -13,6 +13,8 @@
 
 #include "lspserver/Protocol.h"
 
+#include <boost/asio/post.hpp>
+
 #include <llvm/Support/CommandLine.h>
 
 using namespace nixd;
@@ -59,10 +61,12 @@ std::string getDefaultNixOSOptionsExpr() {
 
 void Controller::evalExprWithProgress(AttrSetClient &Client,
                                       const EvalExprParams &Params,
-                                      std::string_view Description) {
+                                      std::string_view Description,
+                                      llvm::unique_function<void()> OnSuccess) {
   auto Token = rand();
   auto Action = [Token, Description = std::string(Description),
-                 this](llvm::Expected<EvalExprResponse> Resp) {
+                 OnSuccess = std::move(OnSuccess),
+                 this](llvm::Expected<EvalExprResponse> Resp) mutable {
     endWorkDoneProgress({
         .token = Token,
         .value = WorkDoneProgressEnd{.message = "evaluated " +
@@ -72,6 +76,8 @@ void Controller::evalExprWithProgress(AttrSetClient &Client,
       lspserver::elog("{0} eval expr: {1}", Description, Resp.takeError());
       return;
     }
+    if (OnSuccess)
+      OnSuccess();
   };
   createWorkDoneProgress({Token});
   beginWorkDoneProgress({.token = Token,
@@ -180,14 +186,17 @@ void Controller::
   }
 
   // Launch nixos worker also.
+  AttrSetClient *NixOSOptionsClient = nullptr;
   {
     std::lock_guard _(OptionsLock);
     startOption("nixos", Options["nixos"]);
 
-    if (AttrSetClient *Client = Options["nixos"]->client())
-      evalExprWithProgress(*Client, getDefaultNixOSOptionsExpr(),
-                           "nixos options");
+    NixOSOptionsClient = Options["nixos"]->client();
   }
+  if (NixOSOptionsClient)
+    evalExprWithProgress(*NixOSOptionsClient, getDefaultNixOSOptionsExpr(),
+                         "nixos options",
+                         [this]() { noteOptionProviderChanged("nixos"); });
   try {
     Config = parseCLIConfig();
   } catch (LLVMErrorException &Err) {

@@ -8,17 +8,22 @@
 #include "Convert.h"
 
 #include "lspserver/Protocol.h"
+#include "lspserver/SourceCode.h"
 
 #include "nixd/Controller/Controller.h"
+#include "nixd/Controller/Option.h"
 #include "nixd/Protocol/AttrSet.h"
 
 #include <nixf/Sema/VariableLookup.h>
 
 #include <boost/asio/post.hpp>
 
+#include <cctype>
 #include <exception>
+#include <optional>
 #include <semaphore>
 #include <set>
+#include <string_view>
 #include <utility>
 
 using namespace nixd;
@@ -46,6 +51,41 @@ void addItem(std::vector<CompletionItem> &Items, CompletionItem Item) {
     throw ExceedSizeError();
   }
   Items.emplace_back(std::move(Item));
+}
+
+bool isWhitespace(char C) {
+  return C == ' ' || C == '\t' || C == '\n' || C == '\r';
+}
+
+const Node *findCompletionNode(const Node &AST, std::string_view Src,
+                               nixf::Position Pos) {
+  if (const Node *Desc = AST.descend({Pos, Pos}))
+    return Desc;
+
+  lspserver::Position LSPPos{.line = Pos.line(), .character = Pos.column()};
+  llvm::Expected<size_t> Offset =
+      lspserver::positionToOffset(Src, LSPPos, true);
+  if (!Offset) {
+    llvm::consumeError(Offset.takeError());
+    return nullptr;
+  }
+
+  for (size_t I = *Offset; I > 0; --I) {
+    const size_t Prev = I - 1;
+    if (isWhitespace(Src[Prev]))
+      continue;
+    const lspserver::Position PrevPos = lspserver::offsetToPosition(Src, Prev);
+    return AST.descend({nixf::Position(PrevPos.line, PrevPos.character),
+                        nixf::Position(PrevPos.line, PrevPos.character)});
+  }
+  return nullptr;
+}
+
+bool isBooleanOption(const OptionDescription &Desc) {
+  if (!Desc.Type)
+    return false;
+  const std::optional<ParsedOptionType> Parsed = parseOptionType(*Desc.Type);
+  return Parsed && Parsed->acceptsBoolean();
 }
 
 class VLACompletionProvider {
@@ -159,11 +199,6 @@ public:
 
 /// \brief Provide completion list by nixpkgs module system (options).
 class OptionCompletionProvider {
-  AttrSetClient &OptionClient;
-
-  // Where is the module set. (e.g. nixos)
-  std::string ModuleOrigin;
-
   // Wheter the client support code snippets.
   bool ClientSupportSnippet;
 
@@ -185,48 +220,33 @@ class OptionCompletionProvider {
 
   void fillInsertText(CompletionItem &Item, const std::string &Name,
                       const OptionDescription &Desc) const {
+    std::string Example = Desc.Example.value_or("");
+    if (Example.empty() && isBooleanOption(Desc))
+      Example = "true";
+
     if (!ClientSupportSnippet) {
       Item.insertTextFormat = InsertTextFormat::PlainText;
-      Item.insertText = Name + " = " + Desc.Example.value_or("") + ";";
+      Item.insertText = Name + " = " + Example + ";";
       return;
     }
     Item.insertTextFormat = InsertTextFormat::Snippet;
-    Item.insertText =
-        Name + " = " +
-        "${1:" + escapeCharacters({'\\', '$', '}'}, Desc.Example.value_or("")) +
-        "}" + ";";
+    Item.insertText = Name + " = " +
+                      "${1:" + escapeCharacters({'\\', '$', '}'}, Example) +
+                      "}" + ";";
   }
 
 public:
-  OptionCompletionProvider(AttrSetClient &OptionClient,
-                           std::string ModuleOrigin, bool ClientSupportSnippet)
-      : OptionClient(OptionClient), ModuleOrigin(std::move(ModuleOrigin)),
-        ClientSupportSnippet(ClientSupportSnippet) {}
+  OptionCompletionProvider(bool ClientSupportSnippet)
+      : ClientSupportSnippet(ClientSupportSnippet) {}
 
-  void completeOptions(std::vector<std::string> Scope, std::string Prefix,
+  void completeOptions(const std::vector<ResolvedOptionField> &Fields,
                        std::vector<CompletionItem> &Items) {
-    std::binary_semaphore Ready(0);
-    OptionCompleteResponse Names;
-    auto OnReply = [&Ready,
-                    &Names](llvm::Expected<OptionCompleteResponse> Resp) {
-      if (!Resp) {
-        lspserver::elog("option worker reported: {0}", Resp.takeError());
-        Ready.release();
-        return;
-      }
-      Names = *Resp; // Copy response to waiting thread.
-      Ready.release();
-    };
-    // Send request.
-    AttrPathCompleteParams Params{std::move(Scope), std::move(Prefix)};
-    OptionClient.optionComplete(Params, std::move(OnReply));
-    Ready.acquire();
-    // Now we have "Names", use these to fill "Items".
-    for (const nixd::OptionField &Field : Names) {
+    for (const ResolvedOptionField &Resolved : Fields) {
+      const nixd::OptionField &Field = Resolved.Field;
       CompletionItem Item;
 
       Item.label = Field.Name;
-      Item.detail = ModuleOrigin;
+      Item.detail = Resolved.ProviderName;
 
       if (Field.Description) {
         const OptionDescription &Desc = *Field.Description;
@@ -253,36 +273,51 @@ public:
   }
 };
 
-void completeAttrName(const std::vector<std::string> &Scope,
-                      const std::string &Prefix,
-                      Controller::OptionMapTy &Options, bool CompletionSnippets,
-                      std::vector<CompletionItem> &List) {
-  for (const auto &[Name, Provider] : Options) {
-    AttrSetClient *Client = Options.at(Name)->client();
-    if (!Client) [[unlikely]] {
-      elog("skipped client {0} as it is dead", Name);
-      continue;
-    }
-    OptionCompletionProvider OCP(*Client, Name, CompletionSnippets);
-    OCP.completeOptions(Scope, Prefix, List);
-  }
+void completeOptionNames(const std::vector<ResolvedOptionField> &Fields,
+                         bool CompletionSnippets,
+                         std::vector<CompletionItem> &List) {
+  OptionCompletionProvider OCP(CompletionSnippets);
+  OCP.completeOptions(Fields, List);
 }
 
-void completeAttrPath(const Node &N, const ParentMapAnalysis &PM,
-                      std::mutex &OptionsLock, Controller::OptionMapTy &Options,
-                      bool Snippets,
-                      std::vector<lspserver::CompletionItem> &Items) {
+std::optional<AttrPathCompleteParams>
+optionAttrPathCompletionParams(const Node &N, const ParentMapAnalysis &PM) {
   std::vector<std::string> Scope;
   using PathResult = FindAttrPathResult;
   auto R = findAttrPathForOptions(N, PM, Scope);
-  if (R == PathResult::OK) {
-    // Construct request.
-    std::string Prefix = Scope.back();
-    Scope.pop_back();
-    {
-      std::lock_guard _(OptionsLock);
-      completeAttrName(Scope, Prefix, Options, Snippets, Items);
+  if (R != PathResult::OK || Scope.empty())
+    return std::nullopt;
+
+  std::string Prefix = Scope.back();
+  Scope.pop_back();
+  return AttrPathCompleteParams{.Scope = std::move(Scope),
+                                .Prefix = std::move(Prefix)};
+}
+
+std::string optionValuePrefix(const OptionValueContext &Context) {
+  const auto &Value = Context.Binding->value();
+  if (!Value || Value->kind() != Node::NK_ExprVar)
+    return "";
+  return static_cast<const ExprVar &>(*Value).id().name();
+}
+
+void completeOptionValue(const OptionValueContext &Context,
+                         const std::vector<ResolvedOptionInfo> &Infos,
+                         std::vector<CompletionItem> &Items) {
+  const std::string Prefix = optionValuePrefix(Context);
+  for (const ResolvedOptionInfo &Info : Infos) {
+    if (!isBooleanOption(Info.Description))
+      continue;
+    for (std::string_view Value : {"true", "false"}) {
+      if (!Value.starts_with(Prefix))
+        continue;
+      addItem(Items, CompletionItem{
+                         .label = std::string(Value),
+                         .kind = CompletionItemKind::Keyword,
+                         .detail = "boolean option value",
+                     });
     }
+    return;
   }
 }
 
@@ -384,17 +419,25 @@ void Controller::onCompletion(const CompletionParams &Params,
       const auto TU = CheckDefault(getTU(File));
       const auto AST = CheckDefault(getAST(*TU));
 
-      const auto *Desc = AST->descend({Pos, Pos});
-      CheckDefault(Desc && Desc->children().empty());
+      const auto *Desc = findCompletionNode(*AST, TU->src(), Pos);
+      CheckDefault(Desc);
 
       const auto &N = *Desc;
       const auto &PM = *TU->parentMap();
-      const auto &UpExpr = *CheckDefault(PM.upExpr(N));
 
       return [&]() {
         CompletionList List;
         const VariableLookupAnalysis &VLA = *TU->variableLookup();
         try {
+          if (std::optional<OptionValueContext> Context =
+                  findOptionValueContext(N, PM, Pos)) {
+            completeOptionValue(*Context, resolveOptionInfos(Context->Scope),
+                                List.items);
+            if (!List.items.empty())
+              return List;
+          }
+
+          const auto &UpExpr = *CheckDefault(PM.upExpr(N));
           switch (UpExpr.kind()) {
           // In these cases, assume the cursor have "variable" scoping.
           case Node::NK_ExprVar: {
@@ -413,8 +456,12 @@ void Controller::onCompletion(const CompletionParams &Params,
             return List;
           }
           case Node::NK_ExprAttrs: {
-            completeAttrPath(N, PM, OptionsLock, Options,
-                             ClientCaps.CompletionSnippets, List.items);
+            if (std::optional<AttrPathCompleteParams> Params =
+                    optionAttrPathCompletionParams(N, PM)) {
+              completeOptionNames(
+                  completeOptions(Params->Scope, Params->Prefix),
+                  ClientCaps.CompletionSnippets, List.items);
+            }
             return List;
           }
           default:
