@@ -20,11 +20,11 @@ bool nixd::fromJSON(const Value &Params, OptionType::EnumValue &R, Path P) {
     return true;
   }
   if (auto I = Params.getAsInteger()) {
-    R.Integer = *I;
+    R.Integer = I;
     return true;
   }
   if (auto B = Params.getAsBoolean()) {
-    R.Boolean = *B;
+    R.Boolean = B;
     return true;
   }
   if (Params.getAsNull()) {

@@ -1,5 +1,5 @@
 # RUN: nixd --lit-test \
-# RUN: --nixos-options-expr='{ services.example.mode = { _type = "option"; type = { name = "enum"; description = "one of fast, 1, true, or null"; functor.payload.values = [ "fast" 1 true null ]; }; }; }' \
+# RUN: --nixos-options-expr='{ services.example.mode = { _type = "option"; type = { name = "enum"; description = "one of fast, 1, 0, true, false, or null"; functor.payload.values = [ "fast" 1 0 true false null ]; }; }; }' \
 # RUN: < %s | FileCheck %s
 
 <-- initialize(0)
@@ -56,9 +56,17 @@ CHECK:      "filterText": "1",
 CHECK:      "kind": 20,
 CHECK:      "label": "1",
 CHECK:      "detail": "enum option value",
+CHECK:      "filterText": "0",
+CHECK:      "kind": 20,
+CHECK:      "label": "0",
+CHECK:      "detail": "enum option value",
 CHECK:      "filterText": "true",
 CHECK:      "kind": 20,
 CHECK:      "label": "true",
+CHECK:      "detail": "enum option value",
+CHECK:      "filterText": "false",
+CHECK:      "kind": 20,
+CHECK:      "label": "false",
 CHECK:      "detail": "enum option value",
 CHECK:      "filterText": "null",
 CHECK:      "kind": 20,
