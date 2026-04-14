@@ -9,6 +9,7 @@
 
 #include <llvm/Support/FormatVariadic.h>
 
+#include <cctype>
 #include <optional>
 #include <set>
 #include <string>
@@ -90,6 +91,47 @@ enumCompletionValue(const OptionType::EnumValue &Value) {
   if (Value.IsNull)
     return EnumCompletionValue{.Label = "null", .FilterText = "null"};
   return std::nullopt;
+}
+
+std::string toLowerCopy(std::string_view S) {
+  std::string Lower;
+  Lower.reserve(S.size());
+  for (char C : S)
+    Lower.push_back(
+        static_cast<char>(std::tolower(static_cast<unsigned char>(C))));
+  return Lower;
+}
+
+std::optional<OptionType> nestedType(const OptionType &Type,
+                                     std::string_view Name) {
+  auto It = Type.NestedTypes.find(std::string(Name));
+  if (It == Type.NestedTypes.end())
+    return std::nullopt;
+  return It->second;
+}
+
+std::optional<OptionType> elemTypeFor(const OptionType &Type) {
+  return nestedType(Type, "elemType");
+}
+
+std::vector<OptionType> alternativeTypesFor(const OptionType &Type,
+                                            std::string_view LowerName) {
+  std::vector<OptionType> Alternatives;
+  if (LowerName == "either" || LowerName == "oneof") {
+    if (std::optional<OptionType> Left = nestedType(Type, "left"))
+      Alternatives.emplace_back(std::move(*Left));
+    if (std::optional<OptionType> Right = nestedType(Type, "right"))
+      Alternatives.emplace_back(std::move(*Right));
+    if (Alternatives.empty())
+      for (const auto &Entry : Type.NestedTypes)
+        Alternatives.emplace_back(Entry.second);
+  } else if (LowerName == "coercedto") {
+    if (std::optional<OptionType> Coerced = nestedType(Type, "coercedType"))
+      Alternatives.emplace_back(std::move(*Coerced));
+    if (std::optional<OptionType> Final = nestedType(Type, "finalType"))
+      Alternatives.emplace_back(std::move(*Final));
+  }
+  return Alternatives;
 }
 
 /// \brief Provide completion list by nixpkgs module system (options).
@@ -199,15 +241,17 @@ void addOptionValueInsertEdits(const OptionValueContext &Context,
 }
 
 bool completeEnumOptionValue(const OptionValueContext &Context,
-                             const OptionDescription &Desc,
-                             const std::string &Prefix, llvm::StringRef Src,
+                             const OptionType &Type, const std::string &Prefix,
+                             llvm::StringRef Src,
+                             std::set<std::string> &SeenLabels,
                              std::vector<CompletionItem> &Items) {
-  if (!Desc.Type || Desc.Type->EnumValues.empty())
+  if (Type.EnumValues.empty())
     return false;
 
-  for (const OptionType::EnumValue &Value : Desc.Type->EnumValues) {
+  for (const OptionType::EnumValue &Value : Type.EnumValues) {
     std::optional<EnumCompletionValue> Completion = enumCompletionValue(Value);
-    if (!Completion || !Completion->FilterText.starts_with(Prefix))
+    if (!Completion || !Completion->FilterText.starts_with(Prefix) ||
+        SeenLabels.contains(Completion->Label))
       continue;
 
     CompletionItem Item{
@@ -217,10 +261,84 @@ bool completeEnumOptionValue(const OptionValueContext &Context,
         .filterText = Completion->FilterText,
     };
     addOptionValueInsertEdits(Context, Src, Completion->Label, Item);
+    SeenLabels.insert(Completion->Label);
     addItem(Items, std::move(Item));
   }
 
   return true;
+}
+
+bool completeBooleanOptionValue(const OptionValueContext &Context,
+                                const OptionType &Type,
+                                const std::string &Prefix, llvm::StringRef Src,
+                                std::set<std::string> &SeenLabels,
+                                std::vector<CompletionItem> &Items) {
+  const std::optional<ParsedOptionType> Parsed = parseOptionType(Type);
+  if (!Parsed || !Parsed->acceptsBoolean())
+    return false;
+
+  for (std::string_view Value : {"true", "false"}) {
+    if (!Value.starts_with(Prefix) || SeenLabels.contains(std::string(Value)))
+      continue;
+    CompletionItem Item{
+        .label = std::string(Value),
+        .kind = CompletionItemKind::Keyword,
+        .detail = "boolean option value",
+    };
+    addOptionValueInsertEdits(Context, Src, Value, Item);
+    SeenLabels.insert(std::string(Value));
+    addItem(Items, std::move(Item));
+  }
+  return true;
+}
+
+bool completeNullOptionValue(const OptionValueContext &Context,
+                             const std::string &Prefix, llvm::StringRef Src,
+                             std::set<std::string> &SeenLabels,
+                             std::vector<CompletionItem> &Items) {
+  if (!std::string_view("null").starts_with(Prefix) ||
+      SeenLabels.contains("null"))
+    return false;
+
+  CompletionItem Item{
+      .label = "null",
+      .kind = CompletionItemKind::Keyword,
+      .detail = "null option value",
+  };
+  addOptionValueInsertEdits(Context, Src, "null", Item);
+  SeenLabels.insert("null");
+  addItem(Items, std::move(Item));
+  return true;
+}
+
+bool completeOptionValueForType(const OptionValueContext &Context,
+                                const OptionType &Type,
+                                const std::string &Prefix, llvm::StringRef Src,
+                                std::set<std::string> &SeenLabels,
+                                std::vector<CompletionItem> &Items) {
+  bool Handled = false;
+  Handled |=
+      completeEnumOptionValue(Context, Type, Prefix, Src, SeenLabels, Items);
+  Handled |=
+      completeBooleanOptionValue(Context, Type, Prefix, Src, SeenLabels, Items);
+
+  const std::string LowerName = Type.Name ? toLowerCopy(*Type.Name) : "";
+  if (LowerName == "nullor") {
+    Handled |= completeNullOptionValue(Context, Prefix, Src, SeenLabels, Items);
+    if (std::optional<OptionType> Elem = elemTypeFor(Type))
+      Handled |= completeOptionValueForType(Context, *Elem, Prefix, Src,
+                                            SeenLabels, Items);
+  } else if (LowerName == "unique") {
+    if (std::optional<OptionType> Elem = elemTypeFor(Type))
+      Handled |= completeOptionValueForType(Context, *Elem, Prefix, Src,
+                                            SeenLabels, Items);
+  }
+
+  for (const OptionType &Alternative : alternativeTypesFor(Type, LowerName))
+    Handled |= completeOptionValueForType(Context, Alternative, Prefix, Src,
+                                          SeenLabels, Items);
+
+  return Handled;
 }
 
 } // namespace
@@ -251,24 +369,14 @@ void completeOptionValue(const OptionValueContext &Context,
                          llvm::StringRef Src,
                          std::vector<CompletionItem> &Items) {
   const std::string Prefix = optionValuePrefix(Context);
+  std::set<std::string> SeenLabels;
   for (const ResolvedOptionInfo &Info : Infos) {
-    if (completeEnumOptionValue(Context, Info.Description, Prefix, Src, Items))
-      return;
-
-    if (!isBooleanOption(Info.Description))
+    if (!Info.Description.Type)
       continue;
-    for (std::string_view Value : {"true", "false"}) {
-      if (!Value.starts_with(Prefix))
-        continue;
-      CompletionItem Item{
-          .label = std::string(Value),
-          .kind = CompletionItemKind::Keyword,
-          .detail = "boolean option value",
-      };
-      addOptionValueInsertEdits(Context, Src, Value, Item);
-      addItem(Items, std::move(Item));
-    }
-    return;
+
+    if (completeOptionValueForType(Context, *Info.Description.Type, Prefix, Src,
+                                   SeenLabels, Items))
+      return;
   }
 }
 
