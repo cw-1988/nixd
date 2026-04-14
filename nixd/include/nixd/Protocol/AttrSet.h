@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -117,9 +118,59 @@ bool fromJSON(const llvm::json::Value &Params, AttrPathCompleteParams &R,
 using AttrPathCompleteResponse = std::vector<std::string>;
 
 struct OptionType {
+  struct EnumValue {
+    std::optional<std::string> String;
+    std::optional<std::int64_t> Integer;
+    std::optional<bool> Boolean;
+    bool IsNull = false;
+  };
+
   std::optional<std::string> Description;
   std::optional<std::string> Name;
+  std::map<std::string, OptionType> NestedTypes;
+  std::vector<EnumValue> EnumValues;
+
+  struct StringConstraint {
+    bool NonEmpty = false;
+    bool SingleLine = false;
+    bool PasswdEntry = false;
+    std::optional<std::string> Pattern;
+  };
+
+  struct PathConstraint {
+    bool Absolute = false;
+    bool InStore = false;
+    bool AcceptsStringLike = false;
+  };
+
+  struct KnownSubOption {
+    bool HasDefault = false;
+    bool HasEmptyValue = false;
+    bool Required = false;
+    bool Truncated = false;
+  };
+
+  std::optional<StringConstraint> String;
+  std::optional<PathConstraint> Path;
+  std::map<std::string, KnownSubOption> KnownSubOptions;
+  bool KnownSubOptionsComplete = true;
 };
+
+llvm::json::Value toJSON(const OptionType::EnumValue &Params);
+bool fromJSON(const llvm::json::Value &Params, OptionType::EnumValue &R,
+              llvm::json::Path P);
+
+llvm::json::Value toJSON(const OptionType::StringConstraint &Params);
+bool fromJSON(const llvm::json::Value &Params, OptionType::StringConstraint &R,
+              llvm::json::Path P);
+
+llvm::json::Value toJSON(const OptionType::PathConstraint &Params);
+bool fromJSON(const llvm::json::Value &Params, OptionType::PathConstraint &R,
+              llvm::json::Path P);
+
+llvm::json::Value toJSON(const OptionType::KnownSubOption &Params);
+bool fromJSON(const llvm::json::Value &Params, OptionType::KnownSubOption &R,
+              llvm::json::Path P);
 
 llvm::json::Value toJSON(const OptionType &Params);
 bool fromJSON(const llvm::json::Value &Params, OptionType &R,

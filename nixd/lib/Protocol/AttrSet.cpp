@@ -3,18 +3,136 @@
 using namespace nixd;
 using namespace llvm::json;
 
-Value nixd::toJSON(const OptionType &Params) {
+Value nixd::toJSON(const OptionType::EnumValue &Params) {
+  if (Params.String)
+    return *Params.String;
+  if (Params.Integer)
+    return *Params.Integer;
+  if (Params.Boolean)
+    return *Params.Boolean;
+  return nullptr;
+}
+
+bool nixd::fromJSON(const Value &Params, OptionType::EnumValue &R, Path P) {
+  R = OptionType::EnumValue{};
+  if (auto S = Params.getAsString()) {
+    R.String = std::string(*S);
+    return true;
+  }
+  if (auto I = Params.getAsInteger()) {
+    R.Integer = *I;
+    return true;
+  }
+  if (auto B = Params.getAsBoolean()) {
+    R.Boolean = *B;
+    return true;
+  }
+  if (Params.getAsNull()) {
+    R.IsNull = true;
+    return true;
+  }
+  P.report("expected enum scalar");
+  return false;
+}
+
+Value nixd::toJSON(const OptionType::StringConstraint &Params) {
+  Object O{
+      {"NonEmpty", Params.NonEmpty},
+      {"SingleLine", Params.SingleLine},
+      {"PasswdEntry", Params.PasswdEntry},
+  };
+  if (Params.Pattern)
+    O.try_emplace("Pattern", *Params.Pattern);
+  return O;
+}
+
+bool nixd::fromJSON(const Value &Params, OptionType::StringConstraint &R,
+                    Path P) {
+  ObjectMapper O(Params, P);
+  return O                                              //
+         && O.mapOptional("NonEmpty", R.NonEmpty)       //
+         && O.mapOptional("SingleLine", R.SingleLine)   //
+         && O.mapOptional("PasswdEntry", R.PasswdEntry) //
+         && O.mapOptional("Pattern", R.Pattern);
+}
+
+Value nixd::toJSON(const OptionType::PathConstraint &Params) {
   return Object{
-      {"Description", Params.Description},
-      {"Name", Params.Name},
+      {"Absolute", Params.Absolute},
+      {"InStore", Params.InStore},
+      {"AcceptsStringLike", Params.AcceptsStringLike},
   };
 }
 
-bool nixd::fromJSON(const Value &Params, OptionType &R, Path P) {
+bool nixd::fromJSON(const Value &Params, OptionType::PathConstraint &R,
+                    Path P) {
   ObjectMapper O(Params, P);
-  return O                                              //
-         && O.mapOptional("Description", R.Description) //
-         && O.mapOptional("Name", R.Name);
+  return O                                        //
+         && O.mapOptional("Absolute", R.Absolute) //
+         && O.mapOptional("InStore", R.InStore)   //
+         && O.mapOptional("AcceptsStringLike", R.AcceptsStringLike);
+}
+
+Value nixd::toJSON(const OptionType::KnownSubOption &Params) {
+  return Object{
+      {"HasDefault", Params.HasDefault},
+      {"HasEmptyValue", Params.HasEmptyValue},
+      {"Required", Params.Required},
+      {"Truncated", Params.Truncated},
+  };
+}
+
+bool nixd::fromJSON(const Value &Params, OptionType::KnownSubOption &R,
+                    Path P) {
+  R = OptionType::KnownSubOption{};
+  ObjectMapper O(Params, P);
+  return O                                                  //
+         && O.mapOptional("HasDefault", R.HasDefault)       //
+         && O.mapOptional("HasEmptyValue", R.HasEmptyValue) //
+         && O.mapOptional("Required", R.Required)           //
+         && O.mapOptional("Truncated", R.Truncated);
+}
+
+Value nixd::toJSON(const OptionType &Params) {
+  Object O{
+      {"Description", Params.Description},
+      {"Name", Params.Name},
+  };
+  if (!Params.NestedTypes.empty()) {
+    Object NestedTypes;
+    for (const auto &[Name, Type] : Params.NestedTypes)
+      NestedTypes.try_emplace(Name, toJSON(Type));
+    O.try_emplace("NestedTypes", std::move(NestedTypes));
+  }
+  if (!Params.EnumValues.empty())
+    O.try_emplace("EnumValues", Params.EnumValues);
+  if (Params.String)
+    O.try_emplace("StringConstraint", *Params.String);
+  if (Params.Path)
+    O.try_emplace("PathConstraint", *Params.Path);
+  if (!Params.KnownSubOptions.empty()) {
+    Object KnownSubOptions;
+    for (const auto &[Name, Summary] : Params.KnownSubOptions)
+      KnownSubOptions.try_emplace(Name, toJSON(Summary));
+    O.try_emplace("KnownSubOptions", std::move(KnownSubOptions));
+  }
+  if (!Params.KnownSubOptionsComplete)
+    O.try_emplace("KnownSubOptionsComplete", false);
+  return O;
+}
+
+bool nixd::fromJSON(const Value &Params, OptionType &R, Path P) {
+  R = OptionType{};
+  ObjectMapper O(Params, P);
+  return O                                                      //
+         && O.mapOptional("Description", R.Description)         //
+         && O.mapOptional("Name", R.Name)                       //
+         && O.mapOptional("NestedTypes", R.NestedTypes)         //
+         && O.mapOptional("EnumValues", R.EnumValues)           //
+         && O.mapOptional("StringConstraint", R.String)         //
+         && O.mapOptional("PathConstraint", R.Path)             //
+         && O.mapOptional("KnownSubOptions", R.KnownSubOptions) //
+         && O.mapOptional("KnownSubOptionsComplete", R.KnownSubOptionsComplete);
 }
 
 Value nixd::toJSON(const OptionDescription &Params) {
