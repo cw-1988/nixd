@@ -2,6 +2,7 @@
 
 #include "OptionDiagnosticsSupport.h"
 #include "OptionInteger.h"
+#include "OptionTypeNavigation.h"
 
 #include <nixf/Basic/Nodes/Attrs.h>
 #include <nixf/Basic/Nodes/Lambda.h>
@@ -37,55 +38,18 @@ std::string_view trimOuterParens(std::string_view S) {
   return S.substr(1, S.size() - 2);
 }
 
-std::optional<OptionType> descriptionChild(const OptionType &Type,
-                                           std::string_view Prefix) {
-  if (!Type.Description)
-    return std::nullopt;
-  const std::string Lower = toLowerCopy(*Type.Description);
-  std::string_view View = trimOuterParens(Lower);
-  if (!View.starts_with(Prefix))
-    return std::nullopt;
-
-  OptionType Child;
-  Child.Description = std::string(View.substr(Prefix.size()));
-  return Child;
-}
-
 std::optional<OptionType> elemTypeFor(const OptionType &Type,
                                       std::string_view LowerName) {
-  if (std::optional<OptionType> Elem = nestedType(Type, "elemType"))
-    return Elem;
-  if (LowerName == "listof")
-    return descriptionChild(Type, "list of ");
-  if (LowerName == "attrsof" || LowerName == "lazyattrsof")
-    return descriptionChild(Type, "attribute set of ");
-  return std::nullopt;
+  return option_navigation::elemTypeFor(Type, LowerName);
 }
 
 std::optional<OptionType> nullOrTypeFor(const OptionType &Type) {
-  if (std::optional<OptionType> Elem = nestedType(Type, "elemType"))
-    return Elem;
-  return descriptionChild(Type, "null or ");
+  return option_navigation::nullOrTypeFor(Type);
 }
 
 std::vector<OptionType> alternativeTypesFor(const OptionType &Type,
                                             std::string_view LowerName) {
-  std::vector<OptionType> Alternatives;
-  if (LowerName == "either" || LowerName == "oneof") {
-    if (std::optional<OptionType> Left = nestedType(Type, "left"))
-      Alternatives.emplace_back(std::move(*Left));
-    if (std::optional<OptionType> Right = nestedType(Type, "right"))
-      Alternatives.emplace_back(std::move(*Right));
-    if (Alternatives.empty())
-      for (const auto &Entry : Type.NestedTypes)
-        Alternatives.emplace_back(Entry.second);
-  } else if (LowerName == "coercedto") {
-    if (std::optional<OptionType> Coerced = nestedType(Type, "coercedType"))
-      Alternatives.emplace_back(std::move(*Coerced));
-    if (std::optional<OptionType> Final = nestedType(Type, "finalType"))
-      Alternatives.emplace_back(std::move(*Final));
-  }
-  return Alternatives;
+  return option_navigation::alternativeTypesFor(Type, LowerName);
 }
 
 bool enumValueMatches(const OptionType::EnumValue &Expected,
@@ -371,11 +335,56 @@ ValidationResult validateListOf(const OptionType &Type, const OptionType &Elem,
 
   ValidationResult Result = matchesResult();
   const auto &List = static_cast<const ExprList &>(Stripped);
+  if (List.elements().empty() && option_navigation::isNonEmptyListType(Type))
+    return mismatchResult(Value, Scope, Actual, Type);
+
   for (const auto &Element : List.elements()) {
     if (!Element)
       continue;
     ValidationResult Child =
         validateType(Elem, *Element, appendScope(Scope, "[]"), PM, VLA);
+    if (Child.Match == SchemaMatch::Mismatches) {
+      Result.Match = SchemaMatch::Mismatches;
+      std::move(Child.Diagnostics.begin(), Child.Diagnostics.end(),
+                std::back_inserter(Result.Diagnostics));
+    }
+  }
+  return Result;
+}
+
+ValidationResult validateAttrsOf(const OptionType &Type, const OptionType &Elem,
+                                 const Expr &Value,
+                                 const std::vector<std::string> &Scope,
+                                 const ParentMapAnalysis &PM,
+                                 const VariableLookupAnalysis *VLA,
+                                 OptionLiteralKind Actual);
+
+ValidationResult validateLoaOf(const OptionType &Type, const OptionType &Elem,
+                               const Expr &Value,
+                               const std::vector<std::string> &Scope,
+                               const ParentMapAnalysis &PM,
+                               const VariableLookupAnalysis *VLA,
+                               OptionLiteralKind Actual) {
+  if (Actual != OptionLiteralKind::List)
+    return Actual == OptionLiteralKind::Unknown
+               ? unknownResult()
+               : mismatchResult(Value, Scope, Actual, Type);
+
+  const Expr &Stripped = stripParens(Value);
+  if (Stripped.kind() != Node::NK_ExprList)
+    return matchesResult();
+
+  ValidationResult Result = matchesResult();
+  const auto &List = static_cast<const ExprList &>(Stripped);
+  if (List.elements().empty() && option_navigation::isNonEmptyListType(Type))
+    return mismatchResult(Value, Scope, Actual, Type);
+
+  for (const auto &Element : List.elements()) {
+    if (!Element)
+      continue;
+    ValidationResult Child = validateAttrsOf(
+        Type, Elem, *Element, appendScope(Scope, "[]"), PM, VLA,
+        classifyOptionLiteral(resolveStaticValue(*Element, PM, VLA)));
     if (Child.Match == SchemaMatch::Mismatches) {
       Result.Match = SchemaMatch::Mismatches;
       std::move(Child.Diagnostics.begin(), Child.Diagnostics.end(),
@@ -444,6 +453,12 @@ ValidationResult validateSubmoduleAttrset(const OptionType &Type,
                                           const VariableLookupAnalysis *VLA) {
   ValidationResult Result = matchesResult();
   std::optional<OptionType> Freeform = nestedType(Type, "freeformType");
+  const bool CanProveUnknownSubOptions =
+      Type.KnownSubOptionsComplete &&
+      (!Type.NestedTypes.empty() || !Type.KnownSubOptions.empty()) &&
+      !Attrs.sema().isRecursive() && Attrs.sema().dynamicAttrs().empty() &&
+      !hasInheritBinding(Attrs) &&
+      !Attrs.sema().staticAttrs().contains("imports");
 
   for (const auto &[Name, Attr] : Attrs.sema().staticAttrs()) {
     if (!Attr.value())
@@ -491,8 +506,7 @@ ValidationResult validateSubmoduleAttrset(const OptionType &Type,
       continue;
     }
 
-    if (Type.KnownSubOptionsComplete &&
-        (!Type.NestedTypes.empty() || !Type.KnownSubOptions.empty())) {
+    if (CanProveUnknownSubOptions) {
       Result.Match = SchemaMatch::Mismatches;
       Result.Diagnostics.emplace_back(
           makeUnknownDiagnostic(Attr.key(), appendScope(Scope, Name)));
@@ -532,7 +546,7 @@ ValidationResult validateSubmodule(const OptionType &Type, const Expr &Value,
 }
 
 bool hasSubOptionMetadata(const OptionType &Type) {
-  return !Type.KnownSubOptions.empty() || !Type.KnownSubOptionsComplete;
+  return option_navigation::hasSubOptionMetadata(Type);
 }
 
 ValidationResult validateSubOptionNamespace(
@@ -648,7 +662,13 @@ option_diagnostics::validateType(const OptionType &Type, const Expr &Value,
       return validateListOf(Type, *Elem, Value, Scope, PM, VLA, Actual);
   }
 
-  if (LowerName == "attrsof" || LowerName == "lazyattrsof") {
+  if (LowerName == "loaof") {
+    if (std::optional<OptionType> Elem = elemTypeFor(Type, LowerName))
+      return validateLoaOf(Type, *Elem, Value, Scope, PM, VLA, Actual);
+  }
+
+  if (LowerName == "attrsof" || LowerName == "lazyattrsof" ||
+      LowerName == "attrswith") {
     if (std::optional<OptionType> Elem = elemTypeFor(Type, LowerName))
       return validateAttrsOf(Type, *Elem, Value, Scope, PM, VLA, Actual);
   }

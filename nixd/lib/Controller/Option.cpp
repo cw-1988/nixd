@@ -67,7 +67,7 @@ void classifyByName(std::string_view Name, ParsedOptionType &Parsed) {
     markAccepted(Parsed, OptionLiteralKind::AttrSet);
     return;
   }
-  if (Name == "list" || Name == "listof") {
+  if (Name == "list" || Name == "listof" || Name == "loaof") {
     markAccepted(Parsed, OptionLiteralKind::List);
     return;
   }
@@ -98,7 +98,7 @@ void classifyByStableDescription(std::string_view Description,
     markAccepted(Parsed, OptionLiteralKind::AttrSet);
   if (Lower.starts_with("attribute set of "))
     markAccepted(Parsed, OptionLiteralKind::AttrSet);
-  if (Lower.starts_with("list of "))
+  if (Lower.starts_with("list of ") || Lower.starts_with("non-empty list of "))
     markAccepted(Parsed, OptionLiteralKind::List);
   if (Lower == "submodule")
     markAccepted(Parsed, OptionLiteralKind::AttrSet);

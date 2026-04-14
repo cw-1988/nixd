@@ -1,5 +1,7 @@
 #include "nixf/Sema/ParentMap.h"
 
+#include <unordered_set>
+
 using namespace nixf;
 
 void ParentMapAnalysis::dfs(const Node *N, const Node *Parent) {
@@ -15,23 +17,31 @@ const Node *ParentMapAnalysis::query(const Node &N) const {
 }
 
 const Node *ParentMapAnalysis::upExpr(const Node &N) const {
-
-  if (Expr::isExpr(N.kind()))
-    return &N;
-  const Node *Up = query(N);
-  if (isRoot(Up, N) || !Up)
-    return nullptr;
-  return upExpr(*Up);
+  const Node *Current = &N;
+  std::unordered_set<const Node *> Seen;
+  while (Current && Seen.insert(Current).second) {
+    if (Expr::isExpr(Current->kind()))
+      return Current;
+    const Node *Up = query(*Current);
+    if (!Up || isRoot(Up, *Current))
+      return nullptr;
+    Current = Up;
+  }
+  return nullptr;
 }
 
 const Node *ParentMapAnalysis::upTo(const Node &N, Node::NodeKind Kind) const {
-
-  if (N.kind() == Kind)
-    return &N;
-  const Node *Up = query(N);
-  if (isRoot(Up, N) || !Up)
-    return nullptr;
-  return upTo(*Up, Kind);
+  const Node *Current = &N;
+  std::unordered_set<const Node *> Seen;
+  while (Current && Seen.insert(Current).second) {
+    if (Current->kind() == Kind)
+      return Current;
+    const Node *Up = query(*Current);
+    if (!Up || isRoot(Up, *Current))
+      return nullptr;
+    Current = Up;
+  }
+  return nullptr;
 }
 
 void ParentMapAnalysis::runOnAST(const Node &Root) {
