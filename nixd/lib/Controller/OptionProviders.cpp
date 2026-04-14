@@ -1,4 +1,5 @@
 #include "nixd/Controller/Controller.h"
+#include "OptionTypeNavigation.h"
 
 #include <boost/asio/post.hpp>
 
@@ -28,124 +29,22 @@ struct ProviderCompleteReplyState {
   OptionCompleteResponse Names;
 };
 
-std::string toLowerCopy(std::string_view S) {
-  std::string Lower;
-  Lower.reserve(S.size());
-  for (char C : S)
-    Lower.push_back(
-        static_cast<char>(std::tolower(static_cast<unsigned char>(C))));
-  return Lower;
-}
-
-std::string_view trimOuterParens(std::string_view S) {
-  if (S.size() < 2 || S.front() != '(' || S.back() != ')')
-    return S;
-  return S.substr(1, S.size() - 2);
-}
-
-std::optional<OptionType> nestedType(const OptionType &Type,
-                                     std::string_view Name) {
-  auto It = Type.NestedTypes.find(std::string(Name));
-  if (It == Type.NestedTypes.end())
-    return std::nullopt;
-  return It->second;
-}
-
-std::optional<OptionType> descriptionChild(const OptionType &Type,
-                                           std::string_view Prefix) {
-  if (!Type.Description)
-    return std::nullopt;
-  const std::string Lower = toLowerCopy(*Type.Description);
-  std::string_view View = trimOuterParens(Lower);
-  if (!View.starts_with(Prefix))
-    return std::nullopt;
-
-  OptionType Child;
-  Child.Description = std::string(View.substr(Prefix.size()));
-  return Child;
-}
-
 std::optional<OptionType> elemTypeFor(const OptionType &Type,
                                       std::string_view LowerName) {
-  if (std::optional<OptionType> Elem = nestedType(Type, "elemType"))
-    return Elem;
-  if (LowerName == "listof")
-    return descriptionChild(Type, "list of ");
-  if (LowerName == "attrsof" || LowerName == "lazyattrsof")
-    return descriptionChild(Type, "attribute set of ");
-  return std::nullopt;
+  return option_navigation::elemTypeFor(Type, LowerName);
 }
 
 std::optional<OptionType> nullOrTypeFor(const OptionType &Type) {
-  if (std::optional<OptionType> Elem = nestedType(Type, "elemType"))
-    return Elem;
-  return descriptionChild(Type, "null or ");
+  return option_navigation::nullOrTypeFor(Type);
 }
 
 std::vector<OptionType> alternativeTypesFor(const OptionType &Type,
                                             std::string_view LowerName) {
-  std::vector<OptionType> Alternatives;
-  if (LowerName == "either" || LowerName == "oneof") {
-    if (std::optional<OptionType> Left = nestedType(Type, "left"))
-      Alternatives.emplace_back(std::move(*Left));
-    if (std::optional<OptionType> Right = nestedType(Type, "right"))
-      Alternatives.emplace_back(std::move(*Right));
-    if (Alternatives.empty())
-      for (const auto &Entry : Type.NestedTypes)
-        Alternatives.emplace_back(Entry.second);
-  } else if (LowerName == "coercedto") {
-    if (std::optional<OptionType> Coerced = nestedType(Type, "coercedType"))
-      Alternatives.emplace_back(std::move(*Coerced));
-    if (std::optional<OptionType> Final = nestedType(Type, "finalType"))
-      Alternatives.emplace_back(std::move(*Final));
-  }
-  return Alternatives;
+  return option_navigation::alternativeTypesFor(Type, LowerName);
 }
 
 bool hasSubOptionMetadata(const OptionType &Type) {
-  return !Type.KnownSubOptions.empty() || !Type.KnownSubOptionsComplete;
-}
-
-std::optional<OptionType>
-deriveTypeForSuffix(const OptionType &Type,
-                    const std::vector<std::string> &Suffix, size_t Index = 0) {
-  if (Index >= Suffix.size())
-    return Type;
-
-  const std::string LowerName = Type.Name ? toLowerCopy(*Type.Name) : "";
-
-  if (LowerName == "nullor") {
-    if (std::optional<OptionType> Elem = nullOrTypeFor(Type))
-      return deriveTypeForSuffix(*Elem, Suffix, Index);
-  }
-
-  if (LowerName == "unique") {
-    if (std::optional<OptionType> Elem = elemTypeFor(Type, LowerName))
-      return deriveTypeForSuffix(*Elem, Suffix, Index);
-  }
-
-  for (const OptionType &Alternative : alternativeTypesFor(Type, LowerName)) {
-    if (std::optional<OptionType> Derived =
-            deriveTypeForSuffix(Alternative, Suffix, Index))
-      return Derived;
-  }
-
-  if (LowerName == "attrsof" || LowerName == "lazyattrsof" ||
-      LowerName == "listof") {
-    if (std::optional<OptionType> Elem = elemTypeFor(Type, LowerName))
-      return deriveTypeForSuffix(*Elem, Suffix, Index + 1);
-    return std::nullopt;
-  }
-
-  if (LowerName == "submodule" || LowerName == "submodulewith" ||
-      hasSubOptionMetadata(Type)) {
-    if (std::optional<OptionType> Known = nestedType(Type, Suffix[Index]))
-      return deriveTypeForSuffix(*Known, Suffix, Index + 1);
-    if (std::optional<OptionType> Freeform = nestedType(Type, "freeformType"))
-      return deriveTypeForSuffix(*Freeform, Suffix, Index + 1);
-  }
-
-  return std::nullopt;
+  return option_navigation::hasSubOptionMetadata(Type);
 }
 
 std::optional<OptionType>
@@ -153,7 +52,7 @@ deriveTypeFromResolvedInfo(const ResolvedOptionInfo &Info,
                            const std::vector<std::string> &Suffix) {
   if (!Info.Description.Type)
     return std::nullopt;
-  return deriveTypeForSuffix(*Info.Description.Type, Suffix);
+  return option_navigation::deriveTypeFromResolvedInfo(Info, Suffix);
 }
 
 std::vector<ResolvedOptionField> fieldsFromType(std::string_view ProviderName,
@@ -163,7 +62,7 @@ std::vector<ResolvedOptionField> fieldsFromType(std::string_view ProviderName,
 void appendFieldsFromType(std::vector<ResolvedOptionField> &Fields,
                           std::string_view ProviderName, const OptionType &Type,
                           const std::string &Prefix) {
-  const std::string LowerName = Type.Name ? toLowerCopy(*Type.Name) : "";
+  const std::string LowerName = option_navigation::lowerTypeName(Type);
 
   if (LowerName == "nullor") {
     if (std::optional<OptionType> Elem = nullOrTypeFor(Type)) {

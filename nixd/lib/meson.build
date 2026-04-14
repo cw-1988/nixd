@@ -40,6 +40,7 @@ libnixd_lib = library(
     'Controller/OptionDiagnosticsSupport.cpp',
     'Controller/OptionDiagnosticsSchedule.cpp',
     'Controller/OptionTypeValidation.cpp',
+    'Controller/OptionTypeNavigation.cpp',
     'Controller/OptionInteger.cpp',
     'Controller/OptionDiagnostics.cpp',
     'Controller/OptionProviders.cpp',
