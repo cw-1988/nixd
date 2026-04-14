@@ -1,14 +1,20 @@
+#include "OptionDiagnosticsSupport.h"
+#include "OptionTypeValidation.h"
 #include "nixd/Controller/Controller.h"
 #include "nixd/Controller/Option.h"
 
-#include <boost/asio/post.hpp>
-
+#include <algorithm>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <optional>
-#include <sstream>
+#include <set>
+#include <tuple>
+
+#include <nixf/Basic/Nodes/Attrs.h>
 
 using namespace nixd;
+using namespace nixd::option_diagnostics;
 using namespace nixf;
 
 namespace {
@@ -20,89 +26,81 @@ struct OptionDiagnosticContext {
   size_t Queries = 0;
 };
 
-std::string renderScope(const std::vector<std::string> &Scope) {
-  std::ostringstream OS;
-  for (size_t I = 0; I < Scope.size(); ++I) {
-    if (I)
-      OS << ".";
-    OS << Scope[I];
-  }
-  return OS.str();
-}
-
-std::optional<NixdDiagnostic>
+std::vector<NixdDiagnostic>
 validateOptionBinding(const Binding &Binding, const ParentMapAnalysis &PM,
+                      const VariableLookupAnalysis *VLA,
                       OptionDiagnosticContext &Context,
                       const std::function<std::vector<ResolvedOptionInfo>(
                           const std::vector<std::string> &)> &Resolve) {
   const auto &Value = Binding.value();
   if (!Value)
-    return std::nullopt;
-
-  const OptionLiteralKind Actual = classifyOptionLiteral(*Value);
-  if (Actual == OptionLiteralKind::Unknown)
-    return std::nullopt;
+    return {};
+  if (isLetDefinitionBinding(Binding, PM))
+    return {};
 
   std::optional<std::vector<std::string>> Scope =
       findOptionBindingScope(Binding, PM);
   if (!Scope)
-    return std::nullopt;
+    return {};
 
   auto [It, Inserted] = Context.InfoCache.try_emplace(*Scope);
   if (Inserted) {
     if (Context.Queries >= MaxOptionDiagnosticQueries)
-      return std::nullopt;
+      return {};
     ++Context.Queries;
     It->second = Resolve(*Scope);
   }
 
-  std::optional<NixdDiagnostic> FirstMismatch;
+  std::optional<std::vector<NixdDiagnostic>> FirstMismatch;
   for (const ResolvedOptionInfo &Info : It->second) {
     if (!Info.Description.Type)
       continue;
 
-    const std::optional<ParsedOptionType> Expected =
-        parseOptionType(*Info.Description.Type);
-    if (!Expected)
-      continue;
-    const OptionValueMatch Match = optionValueMatch(*Expected, *Value, Actual);
-    if (Match == OptionValueMatch::Matches)
-      return std::nullopt;
-    if (Match == OptionValueMatch::Unknown)
+    ValidationResult Result =
+        validateType(*Info.Description.Type, *Value, *Scope, PM, VLA);
+    if (Result.Match == SchemaMatch::Matches)
+      return {};
+    if (Result.Match == SchemaMatch::Unknown)
       continue;
 
-    if (!FirstMismatch) {
-      FirstMismatch = NixdDiagnostic{
-          .Range = Value->range(),
-          .Severity = NixdDiagnosticSeverity::Error,
-          .Code = "option-value-type",
-          .Source = "nixd",
-          .Message = "value for option `" + renderScope(*Scope) +
-                     "` has type `" + optionLiteralKindName(Actual) +
-                     "`, expected `" + Expected->Rendered + "`",
-      };
-    }
+    if (!FirstMismatch)
+      FirstMismatch = std::move(Result.Diagnostics);
   }
-  return FirstMismatch;
+  return FirstMismatch ? std::move(*FirstMismatch)
+                       : std::vector<NixdDiagnostic>{};
 }
 
 void collectOptionDiagnosticsFromNode(
     const Node &Desc, const ParentMapAnalysis &PM,
-    OptionDiagnosticContext &Context,
+    const VariableLookupAnalysis *VLA, OptionDiagnosticContext &Context,
     const std::function<std::vector<ResolvedOptionInfo>(
         const std::vector<std::string> &)> &Resolve,
     std::vector<NixdDiagnostic> &Diagnostics) {
   if (Desc.kind() == Node::NK_Binding) {
-    if (std::optional<NixdDiagnostic> Diag = validateOptionBinding(
-            static_cast<const Binding &>(Desc), PM, Context, Resolve))
-      Diagnostics.emplace_back(std::move(*Diag));
+    std::vector<NixdDiagnostic> NewDiagnostics = validateOptionBinding(
+        static_cast<const Binding &>(Desc), PM, VLA, Context, Resolve);
+    std::move(NewDiagnostics.begin(), NewDiagnostics.end(),
+              std::back_inserter(Diagnostics));
   }
 
   for (const nixf::Node *Child : Desc.children()) {
     if (Child)
-      collectOptionDiagnosticsFromNode(*Child, PM, Context, Resolve,
+      collectOptionDiagnosticsFromNode(*Child, PM, VLA, Context, Resolve,
                                        Diagnostics);
   }
+}
+
+std::vector<NixdDiagnostic> dedupeDiagnostics(std::vector<NixdDiagnostic> In) {
+  std::vector<NixdDiagnostic> Out;
+  std::set<std::tuple<size_t, size_t, std::string, std::string>> Seen;
+  for (NixdDiagnostic &Diagnostic : In) {
+    auto Key = std::make_tuple(Diagnostic.Range.lCur().offset(),
+                               Diagnostic.Range.rCur().offset(),
+                               Diagnostic.Code, Diagnostic.Message);
+    if (Seen.insert(std::move(Key)).second)
+      Out.emplace_back(std::move(Diagnostic));
+  }
+  return Out;
 }
 
 } // namespace
@@ -117,48 +115,8 @@ Controller::collectOptionDiagnostics(const NixTU &TU) {
   auto Resolve = [this](const std::vector<std::string> &Scope) {
     return resolveOptionInfos(Scope);
   };
-  collectOptionDiagnosticsFromNode(*TU.ast(), *TU.parentMap(), Context, Resolve,
+  collectOptionDiagnosticsFromNode(*TU.ast(), *TU.parentMap(),
+                                   TU.variableLookup(), Context, Resolve,
                                    Diagnostics);
-  return Diagnostics;
-}
-
-void Controller::scheduleOptionDiagnostics(lspserver::PathRef File,
-                                           std::optional<int64_t> Version,
-                                           std::shared_ptr<NixTU> TU) {
-  boost::asio::post(
-      Pool, [this, File = File.str(), Version, TU = std::move(TU)]() mutable {
-        std::vector<NixdDiagnostic> Diagnostics = collectOptionDiagnostics(*TU);
-        {
-          std::lock_guard _(TUsLock);
-          auto It = TUs.find(File);
-          if (It == TUs.end() || It->second != TU)
-            return;
-          TU->setNixdDiagnostics(std::move(Diagnostics));
-        }
-        publishDiagnostics(File, Version, TU->src(), TU->diagnostics(),
-                           TU->nixdDiagnostics());
-      });
-}
-
-void Controller::refreshDiagnostics() {
-  std::vector<std::pair<std::string, std::shared_ptr<NixTU>>> Snapshot;
-  {
-    std::lock_guard _(TUsLock);
-    Snapshot.reserve(TUs.size());
-    for (const auto &[File, TU] : TUs)
-      Snapshot.emplace_back(File.str(), TU);
-  }
-
-  for (const auto &[File, TU] : Snapshot) {
-    std::vector<NixdDiagnostic> Diagnostics = collectOptionDiagnostics(*TU);
-    {
-      std::lock_guard _(TUsLock);
-      auto It = TUs.find(File);
-      if (It == TUs.end() || It->second != TU)
-        continue;
-      TU->setNixdDiagnostics(std::move(Diagnostics));
-    }
-    publishDiagnostics(File, std::nullopt, TU->src(), TU->diagnostics(),
-                       TU->nixdDiagnostics());
-  }
+  return dedupeDiagnostics(std::move(Diagnostics));
 }

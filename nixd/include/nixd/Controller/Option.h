@@ -27,6 +27,7 @@ enum class OptionLiteralKind : std::uint8_t {
   Path,
   List,
   AttrSet,
+  Function,
 };
 
 enum class OptionTypeCoverage : std::uint8_t {

@@ -71,6 +71,10 @@ void classifyByName(std::string_view Name, ParsedOptionType &Parsed) {
     markAccepted(Parsed, OptionLiteralKind::List);
     return;
   }
+  if (Name == "functionto") {
+    markAccepted(Parsed, OptionLiteralKind::Function);
+    return;
+  }
 }
 
 void classifyByStableDescription(std::string_view Description,
@@ -176,6 +180,8 @@ OptionLiteralKind nixd::classifyOptionLiteral(const Expr &Value) {
     return OptionLiteralKind::List;
   case NK::NK_ExprAttrs:
     return OptionLiteralKind::AttrSet;
+  case NK::NK_ExprLambda:
+    return OptionLiteralKind::Function;
   case NK::NK_ExprVar: {
     const auto &Var = static_cast<const ExprVar &>(Value);
     if (Var.id().name() == "null")
@@ -231,6 +237,8 @@ std::string nixd::optionLiteralKindName(OptionLiteralKind Kind) {
     return "list";
   case OptionLiteralKind::AttrSet:
     return "attribute set";
+  case OptionLiteralKind::Function:
+    return "function";
   default:
     return "unknown";
   }
