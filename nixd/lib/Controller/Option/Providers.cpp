@@ -1,5 +1,5 @@
 #include "nixd/Controller/Controller.h"
-#include "OptionTypeNavigation.h"
+#include "Navigation.h"
 
 #include <boost/asio/post.hpp>
 

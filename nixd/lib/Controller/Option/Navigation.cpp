@@ -1,6 +1,6 @@
-#include "OptionTypeNavigation.h"
+#include "Navigation.h"
 
-#include "OptionDiagnosticsSupport.h"
+#include "DiagnosticsSupport.h"
 
 #include <iterator>
 #include <utility>

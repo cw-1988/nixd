@@ -1,6 +1,6 @@
 #include "nixd/Controller/Option.h"
-#include "AST.h"
-#include "OptionInteger.h"
+#include "Controller/AST.h"
+#include "Integer.h"
 
 #include <nixf/Basic/Nodes/Attrs.h>
 #include <nixf/Basic/Nodes/Lambda.h>

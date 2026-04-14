@@ -1,8 +1,8 @@
-#include "OptionTypeValidation.h"
+#include "Validation.h"
 
-#include "OptionDiagnosticsSupport.h"
-#include "OptionInteger.h"
-#include "OptionTypeNavigation.h"
+#include "DiagnosticsSupport.h"
+#include "Navigation.h"
+#include "Validation/Support.h"
 
 #include <nixf/Basic/Nodes/Attrs.h>
 #include <nixf/Basic/Nodes/Lambda.h>
@@ -10,7 +10,6 @@
 #include <nixf/Basic/Nodes/Simple.h>
 
 #include <algorithm>
-#include <cctype>
 #include <iterator>
 #include <optional>
 #include <string>
@@ -20,6 +19,7 @@
 
 using namespace nixd;
 using namespace nixd::option_diagnostics;
+using namespace nixd::option_diagnostics::validation;
 using namespace nixf;
 
 namespace {
@@ -30,12 +30,6 @@ std::optional<OptionType> nestedType(const OptionType &Type,
   if (It == Type.NestedTypes.end())
     return std::nullopt;
   return It->second;
-}
-
-std::string_view trimOuterParens(std::string_view S) {
-  if (S.size() < 2 || S.front() != '(' || S.back() != ')')
-    return S;
-  return S.substr(1, S.size() - 2);
 }
 
 std::optional<OptionType> elemTypeFor(const OptionType &Type,
@@ -50,229 +44,6 @@ std::optional<OptionType> nullOrTypeFor(const OptionType &Type) {
 std::vector<OptionType> alternativeTypesFor(const OptionType &Type,
                                             std::string_view LowerName) {
   return option_navigation::alternativeTypesFor(Type, LowerName);
-}
-
-bool enumValueMatches(const OptionType::EnumValue &Expected,
-                      const Expr &Value) {
-  if (Expected.IsNull)
-    return literalNull(Value);
-  if (Expected.String) {
-    const std::optional<std::string> Actual = literalString(Value);
-    return Actual && *Actual == *Expected.String;
-  }
-  if (Expected.Integer) {
-    const std::optional<std::int64_t> Actual =
-        option_integer::constantValue(Value);
-    return Actual && *Actual == *Expected.Integer;
-  }
-  if (Expected.Boolean) {
-    const std::optional<bool> Actual = literalBool(Value);
-    return Actual && *Actual == *Expected.Boolean;
-  }
-  return false;
-}
-
-SchemaMatch scalarKindMatch(const OptionType &Type, const Expr &Value,
-                            OptionLiteralKind Actual) {
-  if (Type.EnumValues.empty())
-    return SchemaMatch::Unknown;
-  if (Actual == OptionLiteralKind::Unknown)
-    return SchemaMatch::Unknown;
-  for (const OptionType::EnumValue &Enum : Type.EnumValues) {
-    if (enumValueMatches(Enum, Value))
-      return SchemaMatch::Matches;
-  }
-  return SchemaMatch::Mismatches;
-}
-
-std::optional<bool> conservativePatternMatches(std::string_view Pattern,
-                                               std::string_view Literal);
-
-SchemaMatch stringConstraintMatch(const OptionType &Type, const Expr &Value,
-                                  OptionLiteralKind Actual) {
-  if (!Type.String)
-    return SchemaMatch::Unknown;
-  if (Actual != OptionLiteralKind::String)
-    return Actual == OptionLiteralKind::Unknown ? SchemaMatch::Unknown
-                                                : SchemaMatch::Mismatches;
-
-  const std::optional<std::string> Literal = literalString(Value);
-  if (!Literal)
-    return SchemaMatch::Unknown;
-
-  if (Type.String->NonEmpty && Literal->empty())
-    return SchemaMatch::Mismatches;
-  if (Type.String->SingleLine && Literal->find('\n') != std::string::npos)
-    return SchemaMatch::Mismatches;
-  if (Type.String->PasswdEntry && (Literal->find('\n') != std::string::npos ||
-                                   Literal->find(':') != std::string::npos))
-    return SchemaMatch::Mismatches;
-  if (Type.String->SystemdUnitName) {
-    auto HasSuffix = [](std::string_view S) {
-      for (std::string_view Suffix :
-           {".automount", ".device", ".mount", ".path", ".scope", ".service",
-            ".slice", ".socket", ".swap", ".target", ".timer"}) {
-        if (S.ends_with(Suffix) && S.size() > Suffix.size())
-          return true;
-      }
-      return false;
-    };
-
-    if (!HasSuffix(*Literal))
-      return SchemaMatch::Mismatches;
-    for (char C : *Literal) {
-      unsigned char UC = static_cast<unsigned char>(C);
-      if (C == '/' || std::isspace(UC) != 0)
-        return SchemaMatch::Mismatches;
-    }
-  }
-  if (Type.String->Pattern) {
-    std::optional<bool> Matches =
-        conservativePatternMatches(*Type.String->Pattern, *Literal);
-    if (!Matches)
-      return SchemaMatch::Unknown;
-    if (!*Matches)
-      return SchemaMatch::Mismatches;
-  }
-  return SchemaMatch::Matches;
-}
-
-bool isRegexMetachar(char C) {
-  switch (C) {
-  case '.':
-  case '^':
-  case '$':
-  case '|':
-  case '(':
-  case ')':
-  case '[':
-  case ']':
-  case '{':
-  case '}':
-  case '*':
-  case '+':
-  case '?':
-  case '\\':
-    return true;
-  default:
-    return false;
-  }
-}
-
-std::optional<std::string>
-conservativeLiteralPattern(std::string_view Pattern) {
-  std::string Literal;
-  Literal.reserve(Pattern.size());
-
-  for (size_t I = 0; I < Pattern.size(); ++I) {
-    char C = Pattern[I];
-    if (C == '\\') {
-      if (++I >= Pattern.size())
-        return std::nullopt;
-      char Escaped = Pattern[I];
-      if (!isRegexMetachar(Escaped))
-        return std::nullopt;
-      Literal.push_back(Escaped);
-      continue;
-    }
-
-    if (isRegexMetachar(C))
-      return std::nullopt;
-    Literal.push_back(C);
-  }
-
-  return Literal;
-}
-
-std::optional<bool> conservativePatternMatches(std::string_view Pattern,
-                                               std::string_view Literal) {
-  std::optional<std::string> Expected = conservativeLiteralPattern(Pattern);
-  if (!Expected)
-    return std::nullopt;
-  return *Expected == Literal;
-}
-
-bool isStorePath(std::string_view S) { return S.starts_with("/nix/store/"); }
-
-std::optional<OptionType::PathConstraint>
-pathConstraintFor(const OptionType &Type) {
-  if (Type.Path)
-    return Type.Path;
-  if (!Type.Description)
-    return std::nullopt;
-
-  std::string LowerName = Type.Name ? toLowerCopy(*Type.Name) : "";
-  if (!LowerName.empty() && LowerName != "path")
-    return std::nullopt;
-
-  std::string Lower = toLowerCopy(*Type.Description);
-  std::string_view View = trimOuterParens(Lower);
-  if (View != "absolute path")
-    return std::nullopt;
-
-  OptionType::PathConstraint Constraint;
-  Constraint.Absolute = true;
-  Constraint.AcceptsStringLike = true;
-  return Constraint;
-}
-
-SchemaMatch pathConstraintMatch(const OptionType &Type, const Expr &Value,
-                                OptionLiteralKind Actual) {
-  std::optional<OptionType::PathConstraint> Constraint =
-      pathConstraintFor(Type);
-  if (!Constraint)
-    return SchemaMatch::Unknown;
-
-  std::optional<std::string> Text;
-  if (Actual == OptionLiteralKind::Path)
-    Text = pathLiteralText(Value);
-  else if (Actual == OptionLiteralKind::String && Constraint->AcceptsStringLike)
-    Text = literalString(Value);
-  else if (Actual == OptionLiteralKind::Unknown)
-    return SchemaMatch::Unknown;
-  else
-    return SchemaMatch::Mismatches;
-
-  if (!Text)
-    return SchemaMatch::Unknown;
-  if (Constraint->Absolute && !Text->starts_with("/"))
-    return SchemaMatch::Mismatches;
-  if (Constraint->InStore && !isStorePath(*Text))
-    return SchemaMatch::Mismatches;
-  return SchemaMatch::Matches;
-}
-
-bool isDerivationLikeAttrset(const ExprAttrs &Attrs) {
-  const auto &Static = Attrs.sema().staticAttrs();
-  if (Static.contains("outPath"))
-    return true;
-  auto It = Static.find("type");
-  if (It == Static.end() || !It->second.value())
-    return false;
-  const std::optional<std::string> TypeValue =
-      literalString(*It->second.value());
-  return TypeValue && *TypeValue == "derivation";
-}
-
-SchemaMatch packageMatch(const Expr &Value, OptionLiteralKind Actual) {
-  const Expr &Stripped = stripParens(Value);
-  if (Actual == OptionLiteralKind::Path)
-    return SchemaMatch::Matches;
-  if (Actual == OptionLiteralKind::String) {
-    const std::optional<std::string> Literal = literalString(Stripped);
-    if (!Literal)
-      return SchemaMatch::Unknown;
-    return isStorePath(*Literal) ? SchemaMatch::Matches
-                                 : SchemaMatch::Mismatches;
-  }
-  if (Actual == OptionLiteralKind::AttrSet &&
-      Stripped.kind() == Node::NK_ExprAttrs)
-    return isDerivationLikeAttrset(static_cast<const ExprAttrs &>(Stripped))
-               ? SchemaMatch::Matches
-               : SchemaMatch::Unknown;
-  if (Actual == OptionLiteralKind::Unknown)
-    return SchemaMatch::Unknown;
-  return SchemaMatch::Mismatches;
 }
 
 bool sameRange(const LexerCursorRange &LHS, const LexerCursorRange &RHS) {
@@ -626,7 +397,7 @@ option_diagnostics::validateType(const OptionType &Type, const Expr &Value,
     return unknownResult();
   }
 
-  if (pathConstraintFor(Type)) {
+  if (hasPathConstraint(Type)) {
     SchemaMatch Match = pathConstraintMatch(Type, Resolved, Actual);
     if (Match == SchemaMatch::Matches)
       return matchesResult();

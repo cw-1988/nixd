@@ -1,6 +1,6 @@
-#include "OptionDiagnosticsSupport.h"
-#include "OptionTypeValidation.h"
-#include "OptionTypeNavigation.h"
+#include "DiagnosticsSupport.h"
+#include "Validation.h"
+#include "Navigation.h"
 #include "nixd/Controller/Controller.h"
 #include "nixd/Controller/Option.h"
 

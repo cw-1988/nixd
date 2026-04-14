@@ -1,4 +1,4 @@
-#include "OptionInteger.h"
+#include "Integer.h"
 
 #include "nixf/Basic/Nodes/Op.h"
 

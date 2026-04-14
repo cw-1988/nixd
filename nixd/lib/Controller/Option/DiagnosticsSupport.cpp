@@ -1,4 +1,4 @@
-#include "OptionDiagnosticsSupport.h"
+#include "DiagnosticsSupport.h"
 
 #include <nixf/Basic/Nodes/Lambda.h>
 #include <nixf/Basic/Nodes/Simple.h>
