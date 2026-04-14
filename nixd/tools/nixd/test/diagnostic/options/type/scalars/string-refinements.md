@@ -1,5 +1,5 @@
 # RUN: nixd --lit-test \
-# RUN: --nixos-options-expr='{ services.example.nonEmptyGood = { _type = "option"; type = { name = "nonEmptyStr"; description = "non-empty string"; }; }; services.example.nonEmptyBad = { _type = "option"; type = { name = "nonEmptyStr"; description = "non-empty string"; }; }; services.example.passwdGood = { _type = "option"; type = { name = "passwdEntry str"; description = "string, not containing newlines or colons"; }; }; services.example.passwdBad = { _type = "option"; type = { name = "passwdEntry str"; description = "string, not containing newlines or colons"; }; }; services.example.unitTemplateGood = { _type = "option"; type = { name = "systemdUnitName"; description = "systemd unit name"; }; }; services.example.unitInstanceGood = { _type = "option"; type = { name = "systemdUnitName"; description = "systemd unit name"; }; }; services.example.unitNoSuffixBad = { _type = "option"; type = { name = "systemdUnitName"; description = "systemd unit name"; }; }; services.example.unitSlashBad = { _type = "option"; type = { name = "systemdUnitName"; description = "systemd unit name"; }; }; services.example.pattern = { _type = "option"; type = { name = "strMatching"; description = "string matching digits"; functor.payload = "\\d+"; }; }; }' \
+# RUN: --nixos-options-expr='{ services.example.nonEmptyGood = { _type = "option"; type = { name = "nonEmptyStr"; description = "non-empty string"; }; }; services.example.nonEmptyBad = { _type = "option"; type = { name = "nonEmptyStr"; description = "non-empty string"; }; }; services.example.passwdGood = { _type = "option"; type = { name = "passwdEntry str"; description = "string, not containing newlines or colons"; }; }; services.example.passwdBad = { _type = "option"; type = { name = "passwdEntry str"; description = "string, not containing newlines or colons"; }; }; services.example.unitTemplateGood = { _type = "option"; type = { name = "systemdUnitName"; description = "systemd unit name"; }; }; services.example.unitInstanceGood = { _type = "option"; type = { name = "systemdUnitName"; description = "systemd unit name"; }; }; services.example.unitNoSuffixBad = { _type = "option"; type = { name = "systemdUnitName"; description = "systemd unit name"; }; }; services.example.unitSlashBad = { _type = "option"; type = { name = "systemdUnitName"; description = "systemd unit name"; }; }; services.example.pattern = { _type = "option"; type = { name = "strMatching"; description = "string matching digits"; functor.payload = "\\d+"; }; }; services.example.literalPatternGood = { _type = "option"; type = { name = "strMatching"; description = "string matching abc"; functor.payload = "abc"; }; }; services.example.literalPatternBad = { _type = "option"; type = { name = "strMatching"; description = "string matching abc"; functor.payload = "abc"; }; }; }' \
 # RUN: < %s | FileCheck %s
 
 <-- initialize(0)
@@ -32,6 +32,8 @@
   services.example.unitNoSuffixBad = "nginx";
   services.example.unitSlashBad = "foo/bar.service";
   services.example.pattern = "abc";
+  services.example.literalPatternGood = "abc";
+  services.example.literalPatternBad = "abd";
 }
 ```
 
@@ -45,6 +47,8 @@ CHECK-NOT: value for option `services.example.unitInstanceGood`
 CHECK: "message": "value for option `services.example.unitNoSuffixBad` has type `string`, expected `systemdUnitName systemd unit name`"
 CHECK: "message": "value for option `services.example.unitSlashBad` has type `string`, expected `systemdUnitName systemd unit name`"
 CHECK-NOT: value for option `services.example.pattern`
+CHECK-NOT: value for option `services.example.literalPatternGood`
+CHECK: "message": "value for option `services.example.literalPatternBad` has type `string`, expected `strMatching string matching abc`"
 ```
 
 ```json
