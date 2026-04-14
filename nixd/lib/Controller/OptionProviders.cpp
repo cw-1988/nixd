@@ -5,11 +5,227 @@
 #include <llvm/Support/Error.h>
 
 #include <algorithm>
+#include <cctype>
+#include <iterator>
 #include <optional>
 #include <semaphore>
+#include <set>
+#include <string_view>
 #include <tuple>
 
 using namespace nixd;
+
+namespace {
+
+std::string toLowerCopy(std::string_view S) {
+  std::string Lower;
+  Lower.reserve(S.size());
+  for (char C : S)
+    Lower.push_back(
+        static_cast<char>(std::tolower(static_cast<unsigned char>(C))));
+  return Lower;
+}
+
+std::string_view trimOuterParens(std::string_view S) {
+  if (S.size() < 2 || S.front() != '(' || S.back() != ')')
+    return S;
+  return S.substr(1, S.size() - 2);
+}
+
+std::optional<OptionType> nestedType(const OptionType &Type,
+                                     std::string_view Name) {
+  auto It = Type.NestedTypes.find(std::string(Name));
+  if (It == Type.NestedTypes.end())
+    return std::nullopt;
+  return It->second;
+}
+
+std::optional<OptionType> descriptionChild(const OptionType &Type,
+                                           std::string_view Prefix) {
+  if (!Type.Description)
+    return std::nullopt;
+  const std::string Lower = toLowerCopy(*Type.Description);
+  std::string_view View = trimOuterParens(Lower);
+  if (!View.starts_with(Prefix))
+    return std::nullopt;
+
+  OptionType Child;
+  Child.Description = std::string(View.substr(Prefix.size()));
+  return Child;
+}
+
+std::optional<OptionType> elemTypeFor(const OptionType &Type,
+                                      std::string_view LowerName) {
+  if (std::optional<OptionType> Elem = nestedType(Type, "elemType"))
+    return Elem;
+  if (LowerName == "listof")
+    return descriptionChild(Type, "list of ");
+  if (LowerName == "attrsof" || LowerName == "lazyattrsof")
+    return descriptionChild(Type, "attribute set of ");
+  return std::nullopt;
+}
+
+std::optional<OptionType> nullOrTypeFor(const OptionType &Type) {
+  if (std::optional<OptionType> Elem = nestedType(Type, "elemType"))
+    return Elem;
+  return descriptionChild(Type, "null or ");
+}
+
+std::vector<OptionType> alternativeTypesFor(const OptionType &Type,
+                                            std::string_view LowerName) {
+  std::vector<OptionType> Alternatives;
+  if (LowerName == "either" || LowerName == "oneof") {
+    if (std::optional<OptionType> Left = nestedType(Type, "left"))
+      Alternatives.emplace_back(std::move(*Left));
+    if (std::optional<OptionType> Right = nestedType(Type, "right"))
+      Alternatives.emplace_back(std::move(*Right));
+    if (Alternatives.empty())
+      for (const auto &Entry : Type.NestedTypes)
+        Alternatives.emplace_back(Entry.second);
+  } else if (LowerName == "coercedto") {
+    if (std::optional<OptionType> Coerced = nestedType(Type, "coercedType"))
+      Alternatives.emplace_back(std::move(*Coerced));
+    if (std::optional<OptionType> Final = nestedType(Type, "finalType"))
+      Alternatives.emplace_back(std::move(*Final));
+  }
+  return Alternatives;
+}
+
+bool hasSubOptionMetadata(const OptionType &Type) {
+  return !Type.KnownSubOptions.empty() || !Type.KnownSubOptionsComplete;
+}
+
+std::optional<OptionType>
+deriveTypeForSuffix(const OptionType &Type,
+                    const std::vector<std::string> &Suffix, size_t Index = 0) {
+  if (Index >= Suffix.size())
+    return Type;
+
+  const std::string LowerName = Type.Name ? toLowerCopy(*Type.Name) : "";
+
+  if (LowerName == "nullor") {
+    if (std::optional<OptionType> Elem = nullOrTypeFor(Type))
+      return deriveTypeForSuffix(*Elem, Suffix, Index);
+  }
+
+  if (LowerName == "unique") {
+    if (std::optional<OptionType> Elem = elemTypeFor(Type, LowerName))
+      return deriveTypeForSuffix(*Elem, Suffix, Index);
+  }
+
+  for (const OptionType &Alternative : alternativeTypesFor(Type, LowerName)) {
+    if (std::optional<OptionType> Derived =
+            deriveTypeForSuffix(Alternative, Suffix, Index))
+      return Derived;
+  }
+
+  if (LowerName == "attrsof" || LowerName == "lazyattrsof" ||
+      LowerName == "listof") {
+    if (std::optional<OptionType> Elem = elemTypeFor(Type, LowerName))
+      return deriveTypeForSuffix(*Elem, Suffix, Index + 1);
+    return std::nullopt;
+  }
+
+  if (LowerName == "submodule" || LowerName == "submodulewith" ||
+      hasSubOptionMetadata(Type)) {
+    if (std::optional<OptionType> Known = nestedType(Type, Suffix[Index]))
+      return deriveTypeForSuffix(*Known, Suffix, Index + 1);
+    if (std::optional<OptionType> Freeform = nestedType(Type, "freeformType"))
+      return deriveTypeForSuffix(*Freeform, Suffix, Index + 1);
+  }
+
+  return std::nullopt;
+}
+
+std::optional<OptionType>
+deriveTypeFromResolvedInfo(const ResolvedOptionInfo &Info,
+                           const std::vector<std::string> &Suffix) {
+  if (!Info.Description.Type)
+    return std::nullopt;
+  return deriveTypeForSuffix(*Info.Description.Type, Suffix);
+}
+
+std::vector<ResolvedOptionField> fieldsFromType(std::string_view ProviderName,
+                                                const OptionType &Type,
+                                                const std::string &Prefix);
+
+void appendFieldsFromType(std::vector<ResolvedOptionField> &Fields,
+                          std::string_view ProviderName, const OptionType &Type,
+                          const std::string &Prefix) {
+  const std::string LowerName = Type.Name ? toLowerCopy(*Type.Name) : "";
+
+  if (LowerName == "nullor") {
+    if (std::optional<OptionType> Elem = nullOrTypeFor(Type)) {
+      std::vector<ResolvedOptionField> Nested =
+          fieldsFromType(ProviderName, *Elem, Prefix);
+      Fields.insert(Fields.end(), std::make_move_iterator(Nested.begin()),
+                    std::make_move_iterator(Nested.end()));
+    }
+    return;
+  }
+
+  if (LowerName == "unique") {
+    if (std::optional<OptionType> Elem = elemTypeFor(Type, LowerName)) {
+      std::vector<ResolvedOptionField> Nested =
+          fieldsFromType(ProviderName, *Elem, Prefix);
+      Fields.insert(Fields.end(), std::make_move_iterator(Nested.begin()),
+                    std::make_move_iterator(Nested.end()));
+    }
+    return;
+  }
+
+  std::vector<OptionType> Alternatives = alternativeTypesFor(Type, LowerName);
+  if (!Alternatives.empty()) {
+    for (const OptionType &Alternative : Alternatives) {
+      std::vector<ResolvedOptionField> Nested =
+          fieldsFromType(ProviderName, Alternative, Prefix);
+      Fields.insert(Fields.end(), std::make_move_iterator(Nested.begin()),
+                    std::make_move_iterator(Nested.end()));
+    }
+    return;
+  }
+
+  if (LowerName != "submodule" && LowerName != "submodulewith" &&
+      !hasSubOptionMetadata(Type))
+    return;
+
+  std::set<std::string> Added;
+  for (const auto &[Name, Child] : Type.NestedTypes) {
+    if (Name == "freeformType" || !Name.starts_with(Prefix))
+      continue;
+    OptionField Field;
+    Field.Name = Name;
+    if (Type.KnownSubOptions.contains(Name)) {
+      OptionDescription Desc;
+      Desc.Type = Child;
+      Field.Description = std::move(Desc);
+    }
+    Fields.push_back(ResolvedOptionField{
+        .ProviderName = std::string(ProviderName), .Field = std::move(Field)});
+    Added.insert(Name);
+  }
+
+  for (const auto &[Name, Summary] : Type.KnownSubOptions) {
+    (void)Summary;
+    if (Added.contains(Name) || !Name.starts_with(Prefix))
+      continue;
+    OptionField Field;
+    Field.Name = Name;
+    Field.Description = OptionDescription{};
+    Fields.push_back(ResolvedOptionField{
+        .ProviderName = std::string(ProviderName), .Field = std::move(Field)});
+  }
+}
+
+std::vector<ResolvedOptionField> fieldsFromType(std::string_view ProviderName,
+                                                const OptionType &Type,
+                                                const std::string &Prefix) {
+  std::vector<ResolvedOptionField> Fields;
+  appendFieldsFromType(Fields, ProviderName, Type, Prefix);
+  return Fields;
+}
+
+} // namespace
 
 bool OptionService::InfoCacheKey::operator<(
     const OptionService::InfoCacheKey &Other) const {
@@ -101,6 +317,49 @@ OptionService::complete(const std::vector<OptionProviderRef> &Providers,
   return Fields;
 }
 
+std::vector<ResolvedOptionField>
+OptionService::completeDerived(const std::vector<OptionProviderRef> &Providers,
+                               const std::vector<std::string> &Scope,
+                               const std::string &Prefix) {
+  std::vector<ResolvedOptionField> Fields = complete(Providers, Scope, Prefix);
+  if (!Fields.empty())
+    return Fields;
+
+  for (const ResolvedOptionInfo &Info : resolve(Providers, Scope)) {
+    if (!Info.Description.Type)
+      continue;
+    std::vector<ResolvedOptionField> Nested =
+        fieldsFromType(Info.ProviderName, *Info.Description.Type, Prefix);
+    Fields.insert(Fields.end(), std::make_move_iterator(Nested.begin()),
+                  std::make_move_iterator(Nested.end()));
+  }
+  if (!Fields.empty())
+    return Fields;
+
+  for (size_t PrefixLen = Scope.size(); PrefixLen > 0; --PrefixLen) {
+    std::vector<std::string> ParentScope(Scope.begin(),
+                                         Scope.begin() + PrefixLen);
+    std::vector<std::string> Suffix(Scope.begin() + PrefixLen, Scope.end());
+    if (Suffix.empty())
+      continue;
+
+    for (const ResolvedOptionInfo &Info : resolve(Providers, ParentScope)) {
+      std::optional<OptionType> Derived =
+          deriveTypeFromResolvedInfo(Info, Suffix);
+      if (!Derived)
+        continue;
+      std::vector<ResolvedOptionField> Nested =
+          fieldsFromType(Info.ProviderName, *Derived, Prefix);
+      Fields.insert(Fields.end(), std::make_move_iterator(Nested.begin()),
+                    std::make_move_iterator(Nested.end()));
+    }
+    if (!Fields.empty())
+      return Fields;
+  }
+
+  return Fields;
+}
+
 std::vector<ResolvedOptionInfo>
 OptionService::resolve(const std::vector<OptionProviderRef> &Providers,
                        const std::vector<std::string> &Scope) {
@@ -111,6 +370,39 @@ OptionService::resolve(const std::vector<OptionProviderRef> &Providers,
       Infos.push_back(ResolvedOptionInfo{.ProviderName = Provider.Name,
                                          .Description = std::move(*Desc)});
   }
+  return Infos;
+}
+
+std::vector<ResolvedOptionInfo>
+OptionService::resolveDerived(const std::vector<OptionProviderRef> &Providers,
+                              const std::vector<std::string> &Scope) {
+  std::vector<ResolvedOptionInfo> Infos = resolve(Providers, Scope);
+  if (!Infos.empty())
+    return Infos;
+
+  for (size_t PrefixLen = Scope.size(); PrefixLen > 0; --PrefixLen) {
+    std::vector<std::string> ParentScope(Scope.begin(),
+                                         Scope.begin() + PrefixLen);
+    std::vector<std::string> Suffix(Scope.begin() + PrefixLen, Scope.end());
+    if (Suffix.empty())
+      continue;
+
+    for (const ResolvedOptionInfo &Info : resolve(Providers, ParentScope)) {
+      std::optional<OptionType> Derived =
+          deriveTypeFromResolvedInfo(Info, Suffix);
+      if (!Derived)
+        continue;
+
+      OptionDescription Desc;
+      Desc.Type = std::move(*Derived);
+      Infos.push_back(ResolvedOptionInfo{.ProviderName = Info.ProviderName,
+                                         .Description = std::move(Desc)});
+    }
+
+    if (!Infos.empty())
+      return Infos;
+  }
+
   return Infos;
 }
 
@@ -160,9 +452,20 @@ Controller::completeOptions(const std::vector<std::string> &Scope,
   return OptService.complete(optionProviderSnapshot(), Scope, Prefix);
 }
 
+std::vector<ResolvedOptionField>
+Controller::completeDerivedOptions(const std::vector<std::string> &Scope,
+                                   const std::string &Prefix) {
+  return OptService.completeDerived(optionProviderSnapshot(), Scope, Prefix);
+}
+
 std::vector<ResolvedOptionInfo>
 Controller::resolveOptionInfos(const std::vector<std::string> &Scope) {
   return OptService.resolve(optionProviderSnapshot(), Scope);
+}
+
+std::vector<ResolvedOptionInfo>
+Controller::resolveDerivedOptionInfos(const std::vector<std::string> &Scope) {
+  return OptService.resolveDerived(optionProviderSnapshot(), Scope);
 }
 
 std::vector<lspserver::Location>

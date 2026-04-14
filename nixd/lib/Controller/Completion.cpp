@@ -281,9 +281,9 @@ void Controller::onCompletion(const CompletionParams &Params,
         try {
           if (std::optional<OptionValueContext> Context =
                   findOptionValueContext(N, PM, Pos)) {
-            completion::completeOptionValue(*Context,
-                                            resolveOptionInfos(Context->Scope),
-                                            TU->src(), List.items);
+            completion::completeOptionValue(
+                *Context, resolveDerivedOptionInfos(Context->Scope), TU->src(),
+                List.items);
             if (!List.items.empty())
               return List;
           }
@@ -310,7 +310,7 @@ void Controller::onCompletion(const CompletionParams &Params,
             if (std::optional<AttrPathCompleteParams> Params =
                     completion::optionAttrPathCompletionParams(N, PM)) {
               completion::completeOptionNames(
-                  completeOptions(Params->Scope, Params->Prefix),
+                  completeDerivedOptions(Params->Scope, Params->Prefix),
                   ClientCaps.CompletionSnippets, List.items);
             }
             return List;

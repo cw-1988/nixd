@@ -122,9 +122,18 @@ public:
   complete(const std::vector<OptionProviderRef> &Providers,
            const std::vector<std::string> &Scope, const std::string &Prefix);
 
+  std::vector<ResolvedOptionField>
+  completeDerived(const std::vector<OptionProviderRef> &Providers,
+                  const std::vector<std::string> &Scope,
+                  const std::string &Prefix);
+
   std::vector<ResolvedOptionInfo>
   resolve(const std::vector<OptionProviderRef> &Providers,
           const std::vector<std::string> &Scope);
+
+  std::vector<ResolvedOptionInfo>
+  resolveDerived(const std::vector<OptionProviderRef> &Providers,
+                 const std::vector<std::string> &Scope);
 
   std::vector<lspserver::Location>
   declarationLocations(const std::vector<OptionProviderRef> &Providers,

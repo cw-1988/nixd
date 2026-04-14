@@ -13,6 +13,7 @@
 
 #include <boost/asio/thread_pool.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <set>
 
@@ -147,14 +148,8 @@ private:
     return TU ? getAST(*TU) : nullptr;
   }
 
-#if BOOST_VERSION < 108800
-  // Default constructor is broken in Boost 1.87, fixed in 1.88:
-  // https://github.com/boostorg/asio/commit/30b5974ed34bfa321d268b3135ffaffcb261461a
-  boost::asio::thread_pool Pool{
-      static_cast<size_t>(boost::asio::detail::default_thread_pool_size())};
-#else
-  boost::asio::thread_pool Pool{};
-#endif
+  static std::size_t threadPoolSize();
+  boost::asio::thread_pool Pool{threadPoolSize()};
 
   /// Action right after a document is added (including updates).
   void actOnDocumentAdd(lspserver::PathRef File,
@@ -245,8 +240,13 @@ private:
   std::vector<ResolvedOptionField>
   completeOptions(const std::vector<std::string> &Scope,
                   const std::string &Prefix);
+  std::vector<ResolvedOptionField>
+  completeDerivedOptions(const std::vector<std::string> &Scope,
+                         const std::string &Prefix);
   std::vector<ResolvedOptionInfo>
   resolveOptionInfos(const std::vector<std::string> &Scope);
+  std::vector<ResolvedOptionInfo>
+  resolveDerivedOptionInfos(const std::vector<std::string> &Scope);
   std::vector<lspserver::Location>
   optionDeclarationLocations(const std::vector<std::string> &Scope);
   std::vector<NixdDiagnostic> collectOptionDiagnostics(const NixTU &TU);

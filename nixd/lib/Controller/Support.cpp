@@ -1,4 +1,5 @@
 #include "nixd/Controller/Controller.h"
+#include "nixd/CommandLine/Options.h"
 
 #include <nixf/Basic/Diagnostic.h>
 #include <nixf/Parse/Parser.h>
@@ -7,9 +8,21 @@
 #include <boost/asio/post.hpp>
 
 #include <mutex>
+#include <thread>
 
 using namespace lspserver;
 using namespace nixd;
+
+std::size_t Controller::threadPoolSize() {
+  // Lit tests use FileCheck over the raw message stream, so keep server-side
+  // request and diagnostic scheduling deterministic.
+  if (LitTest)
+    return 1;
+
+  if (std::size_t Threads = std::thread::hardware_concurrency())
+    return Threads;
+  return 1;
+}
 
 void Controller::removeDocument(lspserver::PathRef File) {
   Store.removeDraft(File);

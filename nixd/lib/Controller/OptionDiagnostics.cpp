@@ -113,7 +113,7 @@ Controller::collectOptionDiagnostics(const NixTU &TU) {
 
   OptionDiagnosticContext Context;
   auto Resolve = [this](const std::vector<std::string> &Scope) {
-    return resolveOptionInfos(Scope);
+    return resolveDerivedOptionInfos(Scope);
   };
   collectOptionDiagnosticsFromNode(*TU.ast(), *TU.parentMap(),
                                    TU.variableLookup(), Context, Resolve,
