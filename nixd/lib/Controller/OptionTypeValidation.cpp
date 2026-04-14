@@ -9,6 +9,7 @@
 #include <nixf/Basic/Nodes/Simple.h>
 
 #include <algorithm>
+#include <cctype>
 #include <iterator>
 #include <optional>
 #include <string>
@@ -142,6 +143,25 @@ SchemaMatch stringConstraintMatch(const OptionType &Type, const Expr &Value,
   if (Type.String->PasswdEntry && (Literal->find('\n') != std::string::npos ||
                                    Literal->find(':') != std::string::npos))
     return SchemaMatch::Mismatches;
+  if (Type.String->SystemdUnitName) {
+    auto HasSuffix = [](std::string_view S) {
+      for (std::string_view Suffix :
+           {".automount", ".device", ".mount", ".path", ".scope", ".service",
+            ".slice", ".socket", ".swap", ".target", ".timer"}) {
+        if (S.ends_with(Suffix) && S.size() > Suffix.size())
+          return true;
+      }
+      return false;
+    };
+
+    if (!HasSuffix(*Literal))
+      return SchemaMatch::Mismatches;
+    for (char C : *Literal) {
+      unsigned char UC = static_cast<unsigned char>(C);
+      if (C == '/' || std::isspace(UC) != 0)
+        return SchemaMatch::Mismatches;
+    }
+  }
   if (Type.String->Pattern) {
     std::optional<bool> Matches =
         conservativePatternMatches(*Type.String->Pattern, *Literal);
@@ -210,15 +230,39 @@ std::optional<bool> conservativePatternMatches(std::string_view Pattern,
 
 bool isStorePath(std::string_view S) { return S.starts_with("/nix/store/"); }
 
+std::optional<OptionType::PathConstraint>
+pathConstraintFor(const OptionType &Type) {
+  if (Type.Path)
+    return Type.Path;
+  if (!Type.Description)
+    return std::nullopt;
+
+  std::string LowerName = Type.Name ? toLowerCopy(*Type.Name) : "";
+  if (!LowerName.empty() && LowerName != "path")
+    return std::nullopt;
+
+  std::string Lower = toLowerCopy(*Type.Description);
+  std::string_view View = trimOuterParens(Lower);
+  if (View != "absolute path")
+    return std::nullopt;
+
+  OptionType::PathConstraint Constraint;
+  Constraint.Absolute = true;
+  Constraint.AcceptsStringLike = true;
+  return Constraint;
+}
+
 SchemaMatch pathConstraintMatch(const OptionType &Type, const Expr &Value,
                                 OptionLiteralKind Actual) {
-  if (!Type.Path)
+  std::optional<OptionType::PathConstraint> Constraint =
+      pathConstraintFor(Type);
+  if (!Constraint)
     return SchemaMatch::Unknown;
 
   std::optional<std::string> Text;
   if (Actual == OptionLiteralKind::Path)
     Text = pathLiteralText(Value);
-  else if (Actual == OptionLiteralKind::String && Type.Path->AcceptsStringLike)
+  else if (Actual == OptionLiteralKind::String && Constraint->AcceptsStringLike)
     Text = literalString(Value);
   else if (Actual == OptionLiteralKind::Unknown)
     return SchemaMatch::Unknown;
@@ -227,9 +271,9 @@ SchemaMatch pathConstraintMatch(const OptionType &Type, const Expr &Value,
 
   if (!Text)
     return SchemaMatch::Unknown;
-  if (Type.Path->Absolute && !Text->starts_with("/"))
+  if (Constraint->Absolute && !Text->starts_with("/"))
     return SchemaMatch::Mismatches;
-  if (Type.Path->InStore && !isStorePath(*Text))
+  if (Constraint->InStore && !isStorePath(*Text))
     return SchemaMatch::Mismatches;
   return SchemaMatch::Matches;
 }
@@ -568,7 +612,7 @@ option_diagnostics::validateType(const OptionType &Type, const Expr &Value,
     return unknownResult();
   }
 
-  if (Type.Path) {
+  if (pathConstraintFor(Type)) {
     SchemaMatch Match = pathConstraintMatch(Type, Resolved, Actual);
     if (Match == SchemaMatch::Matches)
       return matchesResult();

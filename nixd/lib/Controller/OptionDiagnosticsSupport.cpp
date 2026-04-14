@@ -114,6 +114,8 @@ option_diagnostics::literalString(const Expr &Value) {
   if (Stripped.kind() != Node::NK_ExprString)
     return std::nullopt;
   const auto &String = static_cast<const ExprString &>(Stripped);
+  if (String.parts().fragments().empty())
+    return "";
   if (!String.isLiteral())
     return std::nullopt;
   return String.literal();

@@ -155,9 +155,9 @@ bool nixd::option_integer::classifyByStableDescription(
   return false;
 }
 
-void nixd::option_integer::refineFromDescription(
-    std::string_view Name, std::string_view Description,
-    ParsedOptionType &Parsed) {
+void nixd::option_integer::refineFromDescription(std::string_view Name,
+                                                 std::string_view Description,
+                                                 ParsedOptionType &Parsed) {
   if (Name != "intbetween")
     return;
   if (const std::optional<OptionIntegerConstraint> Constraint =
