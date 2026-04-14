@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <sstream>
+#include <unordered_set>
 
 using namespace nixd;
 using namespace nixf;
@@ -137,6 +138,60 @@ bool isListElementChild(const ExprList &List, const Node &Child) {
     if (Element.get() == &Child)
       return true;
   return false;
+}
+
+const Node *enclosingBindingNode(const Binding &Binding,
+                                 const ParentMapAnalysis &PM) {
+  const Node *Current = PM.query(Binding);
+  std::unordered_set<const Node *> Seen{&Binding};
+  while (Current && Seen.insert(Current).second) {
+    if (Current->kind() == Node::NK_Binding)
+      return Current;
+    Current = PM.query(*Current);
+  }
+  return nullptr;
+}
+
+bool isPrefixOrEqual(const std::vector<std::string> &Prefix,
+                     const std::vector<std::string> &Scope) {
+  return Prefix.size() <= Scope.size() &&
+         std::equal(Prefix.begin(), Prefix.end(), Scope.begin());
+}
+
+struct OptionBindingContext {
+  const Binding *Bind = nullptr;
+  std::vector<std::string> Scope;
+};
+
+std::optional<OptionBindingContext>
+findOptionValueBinding(const Node &Desc, const ParentMapAnalysis &PM,
+                       Position Pos) {
+  const Node *BindingNode = PM.upTo(Desc, Node::NK_Binding);
+  std::unordered_set<const Node *> Seen;
+  std::optional<OptionBindingContext> Selected;
+
+  while (BindingNode && Seen.insert(BindingNode).second) {
+    const auto &Binding = static_cast<const nixf::Binding &>(*BindingNode);
+    if (Binding.eq() && !(Pos < Binding.eq()->rCur().position()) &&
+        (!Binding.value() || !(Binding.value()->rCur().position() < Pos))) {
+      if (std::optional<std::vector<std::string>> Scope =
+              findOptionBindingScope(Binding, PM)) {
+        if (!Selected) {
+          Selected = OptionBindingContext{.Bind = &Binding,
+                                          .Scope = std::move(*Scope)};
+        } else if (!isPrefixOrEqual(*Scope, Selected->Scope)) {
+          Selected = OptionBindingContext{.Bind = &Binding,
+                                          .Scope = std::move(*Scope)};
+        } else {
+          break;
+        }
+      }
+    }
+
+    BindingNode = enclosingBindingNode(Binding, PM);
+  }
+
+  return Selected;
 }
 
 } // namespace
@@ -286,24 +341,13 @@ nixd::findOptionBindingScope(const Binding &Binding,
 std::optional<OptionValueContext>
 nixd::findOptionValueContext(const Node &Desc, const ParentMapAnalysis &PM,
                              Position Pos) {
-  const nixf::Node *BindingNode = PM.upTo(Desc, nixf::Node::NK_Binding);
-  if (!BindingNode)
+  std::optional<OptionBindingContext> BindingContext =
+      findOptionValueBinding(Desc, PM, Pos);
+  if (!BindingContext)
     return std::nullopt;
 
-  const auto &OuterBinding = static_cast<const nixf::Binding &>(*BindingNode);
-  if (!OuterBinding.eq())
-    return std::nullopt;
-
-  if (Pos < OuterBinding.eq()->rCur().position())
-    return std::nullopt;
-  if (OuterBinding.value() && OuterBinding.value()->rCur().position() < Pos)
-    return std::nullopt;
-
-  std::optional<std::vector<std::string>> Scope =
-      findOptionBindingScope(OuterBinding, PM);
-  if (!Scope)
-    return std::nullopt;
-
+  const Binding &OuterBinding = *BindingContext->Bind;
+  const Node *BindingNode = BindingContext->Bind;
   std::vector<OptionValueChildStep> ReversedPath;
   const Expr *CompletionExpr = static_cast<const Expr *>(PM.upExpr(Desc));
   const Node *Current = &Desc;
@@ -342,6 +386,6 @@ nixd::findOptionValueContext(const Node &Desc, const ParentMapAnalysis &PM,
   return OptionValueContext{.Binding = &OuterBinding,
                             .CompletionExpr = CompletionExpr,
                             .Pos = Pos,
-                            .Scope = std::move(*Scope),
+                            .Scope = std::move(BindingContext->Scope),
                             .ValuePath = std::move(ReversedPath)};
 }

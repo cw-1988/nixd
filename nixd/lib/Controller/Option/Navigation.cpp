@@ -180,13 +180,7 @@ nixd::option_navigation::deriveTypeForSuffix(
   }
 
   if (LowerName == "attrsof" || LowerName == "lazyattrsof" ||
-      LowerName == "attrswith" || LowerName == "loaof") {
-    if (std::optional<OptionType> Elem = elemTypeFor(Type, LowerName))
-      return deriveTypeForSuffix(*Elem, Suffix, Index + 1);
-    return std::nullopt;
-  }
-
-  if (LowerName == "listof") {
+      LowerName == "attrswith") {
     if (std::optional<OptionType> Elem = elemTypeFor(Type, LowerName))
       return deriveTypeForSuffix(*Elem, Suffix, Index + 1);
     return std::nullopt;
@@ -235,8 +229,9 @@ nixd::option_navigation::childTypesForStep(const OptionType &Type,
 
   switch (Step.Kind) {
   case ChildKind::ListElement:
-    if (LowerName == "listof" || LowerName == "loaof" ||
-        isNonEmptyListType(Type)) {
+    if (LowerName == "loaof") {
+      Out.emplace_back(Type);
+    } else if (LowerName == "listof" || isNonEmptyListType(Type)) {
       if (std::optional<OptionType> Elem = elemTypeFor(Type, LowerName))
         Out.emplace_back(std::move(*Elem));
     }
