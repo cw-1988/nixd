@@ -136,5 +136,5 @@ void Controller::onInlayHint(const InlayHintsParams &Params,
       return Response;
     }());
   };
-  boost::asio::post(Pool, std::move(Action));
+  postToPool(std::move(Action));
 }

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <semaphore>
 #include <set>
@@ -16,6 +17,16 @@
 using namespace nixd;
 
 namespace {
+
+struct ProviderInfoReplyState {
+  std::binary_semaphore Ready{0};
+  std::optional<OptionDescription> Desc;
+};
+
+struct ProviderCompleteReplyState {
+  std::binary_semaphore Ready{0};
+  OptionCompleteResponse Names;
+};
 
 std::string toLowerCopy(std::string_view S) {
   std::string Lower;
@@ -260,26 +271,25 @@ OptionService::resolveProviderInfo(const OptionProviderRef &Provider,
       return It->second;
   }
 
-  std::binary_semaphore Ready(0);
-  std::optional<OptionDescription> Desc;
-  auto OnReply = [&Ready, &Desc, Name = Provider.Name](
+  auto State = std::make_shared<ProviderInfoReplyState>();
+  auto OnReply = [State, Name = Provider.Name](
                      llvm::Expected<OptionInfoResponse> Resp) {
     if (Resp) {
-      Desc = *Resp;
+      State->Desc = *Resp;
     } else {
       lspserver::elog("option provider {0}: {1}", Name, Resp.takeError());
     }
-    Ready.release();
+    State->Ready.release();
   };
 
   Provider.Client->optionInfo(Scope, std::move(OnReply));
-  Ready.acquire();
+  State->Ready.acquire();
 
   {
     std::lock_guard _(CacheLock);
-    InfoCache.insert_or_assign(std::move(Key), Desc);
+    InfoCache.insert_or_assign(std::move(Key), State->Desc);
   }
-  return Desc;
+  return State->Desc;
 }
 
 std::vector<ResolvedOptionField>
@@ -291,23 +301,22 @@ OptionService::complete(const std::vector<OptionProviderRef> &Providers,
     if (!Provider.Client)
       continue;
 
-    std::binary_semaphore Ready(0);
-    OptionCompleteResponse Names;
-    auto OnReply = [&Ready, &Names, Name = Provider.Name](
+    auto State = std::make_shared<ProviderCompleteReplyState>();
+    auto OnReply = [State, Name = Provider.Name](
                        llvm::Expected<OptionCompleteResponse> Resp) {
       if (!Resp) {
         lspserver::elog("option worker {0}: {1}", Name, Resp.takeError());
-        Ready.release();
+        State->Ready.release();
         return;
       }
-      Names = *Resp;
-      Ready.release();
+      State->Names = *Resp;
+      State->Ready.release();
     };
 
     Provider.Client->optionComplete({Scope, Prefix}, std::move(OnReply));
-    Ready.acquire();
+    State->Ready.acquire();
 
-    for (OptionField &Field : Names) {
+    for (OptionField &Field : State->Names) {
       Fields.push_back(ResolvedOptionField{
           .ProviderName = Provider.Name,
           .Field = std::move(Field),
@@ -420,10 +429,23 @@ std::vector<lspserver::Location> OptionService::declarationLocations(
 void Controller::noteOptionProviderChanged(std::string_view Name) {
   {
     std::lock_guard _(OptionsLock);
-    OptionGenerations[std::string(Name)] = NextOptionGeneration++;
+    std::string ProviderName(Name);
+    ReadyOptions.insert(ProviderName);
+    SettledOptions.insert(ProviderName);
+    OptionGenerations[std::move(ProviderName)] = NextOptionGeneration++;
   }
   OptService.invalidateProvider(Name);
-  boost::asio::post(Pool, [this]() { refreshDiagnostics(); });
+  if (!ShuttingDown)
+    postToDiagnosticsPool([this]() { refreshDiagnostics(); });
+  OptionsReadyCV.notify_all();
+}
+
+void Controller::noteOptionProviderSettled(std::string_view Name) {
+  {
+    std::lock_guard _(OptionsLock);
+    SettledOptions.insert(std::string(Name));
+  }
+  OptionsReadyCV.notify_all();
 }
 
 std::vector<OptionProviderRef> Controller::optionProviderSnapshot() {
@@ -444,6 +466,39 @@ std::vector<OptionProviderRef> Controller::optionProviderSnapshot() {
     });
   }
   return Providers;
+}
+
+bool Controller::allOptionProvidersReadyLocked() const {
+  return std::all_of(Options.begin(), Options.end(), [&](const auto &Entry) {
+    const auto &[Name, Provider] = Entry;
+    return Provider && Provider->client() && ReadyOptions.contains(Name);
+  });
+}
+
+bool Controller::allOptionProvidersSettledLocked() const {
+  return std::all_of(Options.begin(), Options.end(), [&](const auto &Entry) {
+    const auto &[Name, Provider] = Entry;
+    return !Provider || !Provider->client() || SettledOptions.contains(Name);
+  });
+}
+
+bool Controller::waitForOptionProvidersReadyForTests() {
+  if (!useTrackedTestPool())
+    return true;
+
+  std::unique_lock Lock(OptionsLock);
+  if (Options.empty())
+    return true;
+
+  OptionsReadyCV.wait(Lock, [this]() {
+    return ShuttingDown || allOptionProvidersSettledLocked();
+  });
+  return allOptionProvidersReadyLocked();
+}
+
+bool Controller::optionProvidersReadyForDiagnostics() {
+  std::lock_guard _(OptionsLock);
+  return !Options.empty() && allOptionProvidersReadyLocked();
 }
 
 std::vector<ResolvedOptionField>

@@ -248,5 +248,5 @@ void Controller::onSemanticTokens(const SemanticTokensParams &Params,
       return SemanticTokens{.tokens = Builder.finish()};
     }());
   };
-  boost::asio::post(Pool, std::move(Action));
+  postToPool(std::move(Action));
 }

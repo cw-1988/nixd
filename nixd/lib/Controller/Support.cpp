@@ -24,6 +24,45 @@ std::size_t Controller::threadPoolSize() {
   return 1;
 }
 
+bool Controller::useTrackedTestPool() { return LitTest; }
+
+Controller::~Controller() {
+  if (useTrackedTestPool()) {
+    std::unique_lock Lock(OptionsLock);
+    if (!Options.empty())
+      OptionsReadyCV.wait(
+          Lock, [this]() { return allOptionProvidersSettledLocked(); });
+    Lock.unlock();
+    ShuttingDown = true;
+    waitForPoolTasks();
+  } else {
+    ShuttingDown = true;
+  }
+  Pool.stop();
+  DiagnosticsPool.stop();
+  Pool.join();
+  DiagnosticsPool.join();
+}
+
+void Controller::notePoolTaskStarted() {
+  std::lock_guard _(PoolTasksLock);
+  ++PendingPoolTasks;
+}
+
+void Controller::notePoolTaskFinished() {
+  {
+    std::lock_guard _(PoolTasksLock);
+    assert(PendingPoolTasks > 0);
+    --PendingPoolTasks;
+  }
+  PoolTasksCV.notify_all();
+}
+
+void Controller::waitForPoolTasks() {
+  std::unique_lock Lock(PoolTasksLock);
+  PoolTasksCV.wait(Lock, [this]() { return PendingPoolTasks == 0; });
+}
+
 void Controller::removeDocument(lspserver::PathRef File) {
   Store.removeDraft(File);
   {

@@ -75,5 +75,5 @@ void Controller::onDocumentHighlight(
       }
     }());
   };
-  boost::asio::post(Pool, std::move(Action));
+  postToPool(std::move(Action));
 }

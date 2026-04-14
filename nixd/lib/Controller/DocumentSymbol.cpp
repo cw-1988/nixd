@@ -248,5 +248,5 @@ void Controller::onDocumentSymbol(const DocumentSymbolParams &Params,
       return Symbols;
     }());
   };
-  boost::asio::post(Pool, std::move(Action));
+  postToPool(std::move(Action));
 }

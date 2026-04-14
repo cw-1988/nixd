@@ -150,5 +150,5 @@ void Controller::onFoldingRange(const FoldingRangeParams &Params,
       }
     }());
   };
-  boost::asio::post(Pool, std::move(Action));
+  postToPool(std::move(Action));
 }

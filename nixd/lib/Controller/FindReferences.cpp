@@ -66,5 +66,5 @@ void Controller::onReferences(const TextDocumentPositionParams &Params,
       }
     }());
   };
-  boost::asio::post(Pool, std::move(Action));
+  postToPool(std::move(Action));
 }

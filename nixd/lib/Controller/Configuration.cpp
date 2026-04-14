@@ -79,14 +79,20 @@ void Controller::updateConfig(Configuration NewConfig) {
           // If it does not exist. Launch a new client.
           startOption(Name, Proc);
         }
+        ReadyOptions.erase(Name);
+        SettledOptions.erase(Name);
         assert(Proc);
         Client = Proc->client();
       }
       OptService.invalidateProvider(Name);
       if (Client)
-        evalExprWithProgress(*Client, Opt.expr, Name, [this, Name]() {
-          noteOptionProviderChanged(Name);
-        });
+        evalExprWithProgress(
+            *Client, Opt.expr, Name,
+            [this, Name]() { noteOptionProviderChanged(Name); },
+            [this, Name](bool Success) {
+              if (!Success)
+                noteOptionProviderSettled(Name);
+            });
     }
   }
 
@@ -136,7 +142,7 @@ void Controller::fetchConfig() {
       updateConfig(std::move(NewConfig));
     };
 
-    boost::asio::post(Pool, std::move(ConfigAction));
+    postToPool(std::move(ConfigAction));
   };
   workspaceConfiguration({.items = {ConfigurationItem{.section = "nixd"}}},
                          std::move(Action));

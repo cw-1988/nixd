@@ -92,7 +92,7 @@ void Controller::onRename(const RenameParams &Params,
       }
     }());
   };
-  boost::asio::post(Pool, std::move(Action));
+  postToPool(std::move(Action));
 }
 
 void Controller::onPrepareRename(
@@ -118,5 +118,5 @@ void Controller::onPrepareRename(
       }
     }());
   };
-  boost::asio::post(Pool, std::move(Action));
+  postToPool(std::move(Action));
 }

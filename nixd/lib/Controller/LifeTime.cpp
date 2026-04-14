@@ -62,11 +62,14 @@ std::string getDefaultNixOSOptionsExpr() {
 void Controller::evalExprWithProgress(AttrSetClient &Client,
                                       const EvalExprParams &Params,
                                       std::string_view Description,
-                                      llvm::unique_function<void()> OnSuccess) {
+                                      llvm::unique_function<void()> OnSuccess,
+                                      llvm::unique_function<void(bool)> OnDone) {
   auto Token = rand();
   auto Action = [Token, Description = std::string(Description),
                  OnSuccess = std::move(OnSuccess),
+                 OnDone = std::move(OnDone),
                  this](llvm::Expected<EvalExprResponse> Resp) mutable {
+    bool Success = false;
     endWorkDoneProgress({
         .token = Token,
         .value = WorkDoneProgressEnd{.message = "evaluated " +
@@ -74,10 +77,13 @@ void Controller::evalExprWithProgress(AttrSetClient &Client,
     });
     if (!Resp) {
       lspserver::elog("{0} eval expr: {1}", Description, Resp.takeError());
-      return;
+    } else {
+      Success = true;
+      if (OnSuccess)
+        OnSuccess();
     }
-    if (OnSuccess)
-      OnSuccess();
+    if (OnDone)
+      OnDone(Success);
   };
   createWorkDoneProgress({Token});
   beginWorkDoneProgress({.token = Token,
@@ -194,9 +200,13 @@ void Controller::
     NixOSOptionsClient = Options["nixos"]->client();
   }
   if (NixOSOptionsClient)
-    evalExprWithProgress(*NixOSOptionsClient, getDefaultNixOSOptionsExpr(),
-                         "nixos options",
-                         [this]() { noteOptionProviderChanged("nixos"); });
+    evalExprWithProgress(
+        *NixOSOptionsClient, getDefaultNixOSOptionsExpr(), "nixos options",
+        [this]() { noteOptionProviderChanged("nixos"); },
+        [this](bool Success) {
+          if (!Success)
+            noteOptionProviderSettled("nixos");
+        });
   try {
     Config = parseCLIConfig();
   } catch (LLVMErrorException &Err) {

@@ -270,5 +270,5 @@ void Controller::onHover(const TextDocumentPositionParams &Params,
       return std::nullopt;
     }());
   };
-  boost::asio::post(Pool, std::move(Action));
+  postToPool(std::move(Action));
 }

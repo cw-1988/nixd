@@ -14,8 +14,8 @@ using namespace nixd;
 void Controller::scheduleOptionDiagnostics(lspserver::PathRef File,
                                            std::optional<int64_t> Version,
                                            std::shared_ptr<NixTU> TU) {
-  boost::asio::post(
-      Pool, [this, File = File.str(), Version, TU = std::move(TU)]() mutable {
+  postToDiagnosticsPool(
+      [this, File = File.str(), Version, TU = std::move(TU)]() mutable {
         std::vector<NixdDiagnostic> Diagnostics = collectOptionDiagnostics(*TU);
         {
           std::lock_guard _(TUsLock);

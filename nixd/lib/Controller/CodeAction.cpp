@@ -120,7 +120,7 @@ void Controller::onCodeAction(const lspserver::CodeActionParams &Params,
       return Actions;
     }());
   };
-  boost::asio::post(Pool, std::move(Action));
+  postToPool(std::move(Action));
 }
 
 void Controller::onCodeActionResolve(const lspserver::CodeAction &Params,
@@ -152,7 +152,7 @@ void Controller::onCodeActionResolve(const lspserver::CodeAction &Params,
     // the work is done via showDocument)
     Reply(Params);
   };
-  boost::asio::post(Pool, std::move(Action));
+  postToPool(std::move(Action));
 }
 
 } // namespace nixd

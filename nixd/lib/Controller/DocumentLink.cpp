@@ -76,5 +76,5 @@ void Controller::onDocumentLink(
       return Links;
     }());
   };
-  boost::asio::post(Pool, std::move(Action));
+  postToPool(std::move(Action));
 }

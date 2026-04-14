@@ -12,10 +12,14 @@
 #include "nixf/Basic/Diagnostic.h"
 
 #include <boost/asio/thread_pool.hpp>
+#include <boost/asio/post.hpp>
 
+#include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <set>
+#include <utility>
 
 namespace nixd {
 
@@ -28,12 +32,16 @@ private:
 
   // Use this worker for evaluating nixpkgs.
   std::unique_ptr<AttrSetClientProc> NixpkgsEval;
+  std::atomic<bool> ShuttingDown = false;
 
   std::mutex OptionsLock;
+  std::condition_variable OptionsReadyCV;
   OptionService OptService;
   std::map<std::string, std::uint64_t>
       OptionGenerations;                  // GUARDED_BY(OptionsLock)
   std::uint64_t NextOptionGeneration = 1; // GUARDED_BY(OptionsLock)
+  std::set<std::string> ReadyOptions;     // GUARDED_BY(OptionsLock)
+  std::set<std::string> SettledOptions;   // GUARDED_BY(OptionsLock)
   // Map of option providers.
   //
   // e.g. "nixos" -> nixos worker
@@ -49,7 +57,8 @@ private:
 
   void evalExprWithProgress(AttrSetClient &Client, const EvalExprParams &Params,
                             std::string_view Description,
-                            llvm::unique_function<void()> OnSuccess = nullptr);
+                            llvm::unique_function<void()> OnSuccess = nullptr,
+                            llvm::unique_function<void(bool)> OnDone = nullptr);
 
   lspserver::DraftStore Store;
 
@@ -150,6 +159,35 @@ private:
 
   static std::size_t threadPoolSize();
   boost::asio::thread_pool Pool{threadPoolSize()};
+  boost::asio::thread_pool DiagnosticsPool{1};
+  std::mutex PoolTasksLock;
+  std::condition_variable PoolTasksCV;
+  std::size_t PendingPoolTasks = 0; // GUARDED_BY(PoolTasksLock)
+
+  void notePoolTaskStarted();
+  void notePoolTaskFinished();
+  void waitForPoolTasks();
+  static bool useTrackedTestPool();
+
+  template <typename Fn> void postToPool(Fn &&Action) {
+    notePoolTaskStarted();
+    boost::asio::post(
+        Pool, [this, Action = std::forward<Fn>(Action)]() mutable {
+          struct FinishGuard {
+            Controller *Ctrl;
+            ~FinishGuard() { Ctrl->notePoolTaskFinished(); }
+          } Guard{this};
+          Action();
+        });
+  }
+
+  template <typename Fn> void postToDiagnosticsPool(Fn &&Action) {
+    if (useTrackedTestPool()) {
+      postToPool(std::forward<Fn>(Action));
+      return;
+    }
+    boost::asio::post(DiagnosticsPool, std::forward<Fn>(Action));
+  }
 
   /// Action right after a document is added (including updates).
   void actOnDocumentAdd(lspserver::PathRef File,
@@ -236,6 +274,11 @@ private:
   bool isSuppressed(nixf::Diagnostic::DiagnosticKind Kind);
   bool isNixdDiagnosticSuppressed(std::string_view Code);
   void noteOptionProviderChanged(std::string_view Name);
+  void noteOptionProviderSettled(std::string_view Name);
+  bool allOptionProvidersReadyLocked() const;
+  bool allOptionProvidersSettledLocked() const;
+  bool waitForOptionProvidersReadyForTests();
+  bool optionProvidersReadyForDiagnostics();
   std::vector<OptionProviderRef> optionProviderSnapshot();
   std::vector<ResolvedOptionField>
   completeOptions(const std::vector<std::string> &Scope,
@@ -280,7 +323,7 @@ public:
   Controller(std::unique_ptr<lspserver::InboundPort> In,
              std::unique_ptr<lspserver::OutboundPort> Out);
 
-  ~Controller() override { Pool.join(); }
+  ~Controller() override;
 
   bool isReadyToEval() { return Eval && Eval->ready(); }
 };

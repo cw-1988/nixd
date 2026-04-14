@@ -98,5 +98,5 @@ void Controller::onFormat(const DocumentFormattingParams &Params,
     Reply(std::vector{E});
   };
 
-  boost::asio::post(Pool, std::move(Action));
+  postToPool(std::move(Action));
 }

@@ -377,5 +377,5 @@ void Controller::onDefinition(const TextDocumentPositionParams &Params,
       return error("unknown node type for definition");
     }()));
   };
-  boost::asio::post(Pool, std::move(Action));
+  postToPool(std::move(Action));
 }
