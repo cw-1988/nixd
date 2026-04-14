@@ -32,6 +32,66 @@ bool isBooleanOption(const OptionDescription &Desc) {
   return Parsed && Parsed->acceptsBoolean();
 }
 
+std::string escapeNixString(std::string_view Origin) {
+  std::string Ret;
+  Ret.reserve(Origin.size());
+  for (size_t I = 0; I < Origin.size(); ++I) {
+    char Ch = Origin[I];
+    switch (Ch) {
+    case '\\':
+      Ret += "\\\\";
+      break;
+    case '"':
+      Ret += "\\\"";
+      break;
+    case '\n':
+      Ret += "\\n";
+      break;
+    case '\r':
+      Ret += "\\r";
+      break;
+    case '\t':
+      Ret += "\\t";
+      break;
+    case '$':
+      if (I + 1 < Origin.size() && Origin[I + 1] == '{')
+        Ret += "\\$";
+      else
+        Ret += Ch;
+      break;
+    default:
+      Ret += Ch;
+      break;
+    }
+  }
+  return Ret;
+}
+
+struct EnumCompletionValue {
+  std::string Label;
+  std::string FilterText;
+};
+
+std::optional<EnumCompletionValue>
+enumCompletionValue(const OptionType::EnumValue &Value) {
+  if (Value.String) {
+    std::string Quoted = "\"" + escapeNixString(*Value.String) + "\"";
+    return EnumCompletionValue{.Label = std::move(Quoted),
+                               .FilterText = *Value.String};
+  }
+  if (Value.Integer) {
+    std::string Text = std::to_string(*Value.Integer);
+    return EnumCompletionValue{.Label = Text, .FilterText = std::move(Text)};
+  }
+  if (Value.Boolean) {
+    std::string Text = *Value.Boolean ? "true" : "false";
+    return EnumCompletionValue{.Label = Text, .FilterText = std::move(Text)};
+  }
+  if (Value.IsNull)
+    return EnumCompletionValue{.Label = "null", .FilterText = "null"};
+  return std::nullopt;
+}
+
 /// \brief Provide completion list by nixpkgs module system (options).
 class OptionCompletionProvider {
   // Whether the client supports code snippets.
@@ -138,6 +198,31 @@ void addOptionValueInsertEdits(const OptionValueContext &Context,
   };
 }
 
+bool completeEnumOptionValue(const OptionValueContext &Context,
+                             const OptionDescription &Desc,
+                             const std::string &Prefix, llvm::StringRef Src,
+                             std::vector<CompletionItem> &Items) {
+  if (!Desc.Type || Desc.Type->EnumValues.empty())
+    return false;
+
+  for (const OptionType::EnumValue &Value : Desc.Type->EnumValues) {
+    std::optional<EnumCompletionValue> Completion = enumCompletionValue(Value);
+    if (!Completion || !Completion->FilterText.starts_with(Prefix))
+      continue;
+
+    CompletionItem Item{
+        .label = Completion->Label,
+        .kind = CompletionItemKind::EnumMember,
+        .detail = "enum option value",
+        .filterText = Completion->FilterText,
+    };
+    addOptionValueInsertEdits(Context, Src, Completion->Label, Item);
+    addItem(Items, std::move(Item));
+  }
+
+  return true;
+}
+
 } // namespace
 
 void completeOptionNames(const std::vector<ResolvedOptionField> &Fields,
@@ -167,6 +252,9 @@ void completeOptionValue(const OptionValueContext &Context,
                          std::vector<CompletionItem> &Items) {
   const std::string Prefix = optionValuePrefix(Context);
   for (const ResolvedOptionInfo &Info : Infos) {
+    if (completeEnumOptionValue(Context, Info.Description, Prefix, Src, Items))
+      return;
+
     if (!isBooleanOption(Info.Description))
       continue;
     for (std::string_view Value : {"true", "false"}) {
