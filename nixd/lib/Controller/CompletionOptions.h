@@ -12,6 +12,10 @@
 #include <utility>
 #include <vector>
 
+namespace nixd {
+class AttrSetClient;
+}
+
 namespace nixd::completion {
 
 /// Set max completion size to this value, we don't want to send large lists
@@ -42,7 +46,8 @@ void completeOptionNames(const std::vector<ResolvedOptionField> &Fields,
 
 void completeOptionValue(const OptionValueContext &Context,
                          const std::vector<ResolvedOptionInfo> &Infos,
-                         llvm::StringRef Src,
+                         bool CompletionSnippets,
+                         AttrSetClient *NixpkgsClient, llvm::StringRef Src,
                          std::vector<lspserver::CompletionItem> &Items);
 
 } // namespace nixd::completion

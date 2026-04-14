@@ -42,6 +42,17 @@ enum class OptionValueMatch : std::uint8_t {
   Unknown,
 };
 
+enum class OptionValueChildKind : std::uint8_t {
+  ListElement,
+  AttrValue,
+  FunctionBody,
+};
+
+struct OptionValueChildStep {
+  OptionValueChildKind Kind;
+  std::string Name;
+};
+
 struct OptionIntegerConstraint {
   std::optional<std::int64_t> Min;
   std::optional<std::int64_t> Max;
@@ -61,7 +72,10 @@ struct ParsedOptionType {
 
 struct OptionValueContext {
   const nixf::Binding *Binding = nullptr;
+  const nixf::Expr *CompletionExpr = nullptr;
+  nixf::Position Pos;
   std::vector<std::string> Scope;
+  std::vector<OptionValueChildStep> ValuePath;
 };
 
 struct OptionProviderRef {

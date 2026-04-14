@@ -281,9 +281,11 @@ void Controller::onCompletion(const CompletionParams &Params,
         try {
           if (std::optional<OptionValueContext> Context =
                   findOptionValueContext(N, PM, Pos)) {
-            completion::completeOptionValue(
-                *Context, resolveDerivedOptionInfos(Context->Scope), TU->src(),
-                List.items);
+            if (waitForOptionProvidersReadyForTests())
+              completion::completeOptionValue(
+                  *Context, resolveDerivedOptionInfos(Context->Scope),
+                  ClientCaps.CompletionSnippets, nixpkgsClient(), TU->src(),
+                  List.items);
             if (!List.items.empty())
               return List;
           }
@@ -309,9 +311,10 @@ void Controller::onCompletion(const CompletionParams &Params,
           case Node::NK_ExprAttrs: {
             if (std::optional<AttrPathCompleteParams> Params =
                     completion::optionAttrPathCompletionParams(N, PM)) {
-              completion::completeOptionNames(
-                  completeDerivedOptions(Params->Scope, Params->Prefix),
-                  ClientCaps.CompletionSnippets, List.items);
+              if (waitForOptionProvidersReadyForTests())
+                completion::completeOptionNames(
+                    completeDerivedOptions(Params->Scope, Params->Prefix),
+                    ClientCaps.CompletionSnippets, List.items);
             }
             return List;
           }
@@ -325,7 +328,7 @@ void Controller::onCompletion(const CompletionParams &Params,
       }();
     }());
   };
-  boost::asio::post(Pool, std::move(Action));
+  postToPool(std::move(Action));
 }
 
 void Controller::onCompletionItemResolve(const CompletionItem &Params,
@@ -354,5 +357,5 @@ void Controller::onCompletionItemResolve(const CompletionItem &Params,
 
     Reply(std::move(Resp));
   };
-  boost::asio::post(Pool, std::move(Action));
+  postToPool(std::move(Action));
 }

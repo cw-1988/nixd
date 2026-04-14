@@ -2,6 +2,10 @@
 #include "AST.h"
 #include "OptionInteger.h"
 
+#include <nixf/Basic/Nodes/Attrs.h>
+#include <nixf/Basic/Nodes/Lambda.h>
+
+#include <algorithm>
 #include <cctype>
 #include <sstream>
 
@@ -113,6 +117,26 @@ bool isAbsolutePathString(const Expr &Value) {
 
 bool isStaticString(const ExprString &String) {
   return String.isLiteral() || String.parts().fragments().empty();
+}
+
+std::optional<std::vector<std::string>>
+staticBindingPath(const Binding &Binding) {
+  std::vector<std::string> Path;
+  for (const auto &Name : Binding.path().names()) {
+    if (!Name || !Name->isStatic())
+      return std::nullopt;
+    Path.emplace_back(Name->staticName());
+  }
+  if (Path.empty())
+    return std::nullopt;
+  return Path;
+}
+
+bool isListElementChild(const ExprList &List, const Node &Child) {
+  for (const auto &Element : List.elements())
+    if (Element.get() == &Child)
+      return true;
+  return false;
 }
 
 } // namespace
@@ -266,19 +290,58 @@ nixd::findOptionValueContext(const Node &Desc, const ParentMapAnalysis &PM,
   if (!BindingNode)
     return std::nullopt;
 
-  const auto &Binding = static_cast<const nixf::Binding &>(*BindingNode);
-  if (!Binding.eq())
+  const auto &OuterBinding = static_cast<const nixf::Binding &>(*BindingNode);
+  if (!OuterBinding.eq())
     return std::nullopt;
 
-  if (Pos < Binding.eq()->rCur().position())
+  if (Pos < OuterBinding.eq()->rCur().position())
     return std::nullopt;
-  if (Binding.value() && Binding.value()->rCur().position() < Pos)
+  if (OuterBinding.value() && OuterBinding.value()->rCur().position() < Pos)
     return std::nullopt;
 
   std::optional<std::vector<std::string>> Scope =
-      findOptionBindingScope(Binding, PM);
+      findOptionBindingScope(OuterBinding, PM);
   if (!Scope)
     return std::nullopt;
 
-  return OptionValueContext{.Binding = &Binding, .Scope = std::move(*Scope)};
+  std::vector<OptionValueChildStep> ReversedPath;
+  const Expr *CompletionExpr = static_cast<const Expr *>(PM.upExpr(Desc));
+  const Node *Current = &Desc;
+  const Expr *OuterValue = OuterBinding.value().get();
+  while (Current && Current != OuterValue) {
+    if (PM.isRoot(*Current))
+      break;
+    const Node *Parent = PM.query(*Current);
+    if (!Parent)
+      break;
+
+    if (Parent->kind() == Node::NK_ExprList &&
+        isListElementChild(static_cast<const ExprList &>(*Parent), *Current)) {
+      ReversedPath.push_back(
+          OptionValueChildStep{.Kind = OptionValueChildKind::ListElement});
+    } else if (Parent->kind() == Node::NK_Binding &&
+               Parent != BindingNode &&
+               static_cast<const Binding *>(Parent)->value().get() ==
+                   Current) {
+      if (std::optional<std::vector<std::string>> Path =
+              staticBindingPath(static_cast<const Binding &>(*Parent))) {
+        for (auto It = Path->rbegin(); It != Path->rend(); ++It)
+          ReversedPath.push_back(OptionValueChildStep{
+              .Kind = OptionValueChildKind::AttrValue, .Name = *It});
+      }
+    } else if (Parent->kind() == Node::NK_ExprLambda &&
+               static_cast<const ExprLambda *>(Parent)->body() == Current) {
+      ReversedPath.push_back(
+          OptionValueChildStep{.Kind = OptionValueChildKind::FunctionBody});
+    }
+
+    Current = Parent;
+  }
+
+  std::reverse(ReversedPath.begin(), ReversedPath.end());
+  return OptionValueContext{.Binding = &OuterBinding,
+                            .CompletionExpr = CompletionExpr,
+                            .Pos = Pos,
+                            .Scope = std::move(*Scope),
+                            .ValuePath = std::move(ReversedPath)};
 }
