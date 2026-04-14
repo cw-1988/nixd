@@ -134,6 +134,7 @@ struct OptionType {
     bool NonEmpty = false;
     bool SingleLine = false;
     bool PasswdEntry = false;
+    bool SystemdUnitName = false;
     std::optional<std::string> Pattern;
   };
 

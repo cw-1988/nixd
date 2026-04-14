@@ -40,6 +40,7 @@ Value nixd::toJSON(const OptionType::StringConstraint &Params) {
       {"NonEmpty", Params.NonEmpty},
       {"SingleLine", Params.SingleLine},
       {"PasswdEntry", Params.PasswdEntry},
+      {"SystemdUnitName", Params.SystemdUnitName},
   };
   if (Params.Pattern)
     O.try_emplace("Pattern", *Params.Pattern);
@@ -53,7 +54,8 @@ bool nixd::fromJSON(const Value &Params, OptionType::StringConstraint &R,
          && O.mapOptional("NonEmpty", R.NonEmpty)       //
          && O.mapOptional("SingleLine", R.SingleLine)   //
          && O.mapOptional("PasswdEntry", R.PasswdEntry) //
-         && O.mapOptional("Pattern", R.Pattern);
+         && O.mapOptional("SystemdUnitName", R.SystemdUnitName) &&
+         O.mapOptional("Pattern", R.Pattern);
 }
 
 Value nixd::toJSON(const OptionType::PathConstraint &Params) {

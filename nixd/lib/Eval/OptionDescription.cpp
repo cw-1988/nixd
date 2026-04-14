@@ -221,6 +221,15 @@ void fillEnumValues(nix::EvalState &State, nix::Value &Payload, OptionType &R) {
   }
 }
 
+bool isStringPasswdEntry(std::string_view LowerName, const OptionType &R) {
+  if (LowerName == "passwdentry" || LowerName == "passwdentry str")
+    return true;
+  if (!LowerName.starts_with("passwdentry ") || !R.Description)
+    return false;
+  const std::string LowerDescription = toLowerCopy(*R.Description);
+  return LowerDescription.starts_with("string,");
+}
+
 void fillStringConstraint(nix::EvalState &State, nix::Value *Payload,
                           OptionType &R, std::string_view LowerName) {
   OptionType::StringConstraint Constraint;
@@ -232,9 +241,12 @@ void fillStringConstraint(nix::EvalState &State, nix::Value *Payload,
   } else if (LowerName == "singlelinestr") {
     Constraint.SingleLine = true;
     HasConstraint = true;
-  } else if (LowerName == "passwdentry") {
+  } else if (isStringPasswdEntry(LowerName, R)) {
     Constraint.PasswdEntry = true;
     Constraint.SingleLine = true;
+    HasConstraint = true;
+  } else if (LowerName == "systemdunitname") {
+    Constraint.SystemdUnitName = true;
     HasConstraint = true;
   }
 
@@ -265,6 +277,11 @@ void fillStringConstraint(nix::EvalState &State, nix::Value *Payload,
         Constraint.PasswdEntry = *PasswdEntry;
         HasConstraint = true;
       }
+      if (std::optional<bool> SystemdUnitName =
+              getBool(State, *Payload, "systemdUnitName")) {
+        Constraint.SystemdUnitName = *SystemdUnitName;
+        HasConstraint = true;
+      }
     }
   }
 
@@ -282,22 +299,37 @@ void fillPathConstraint(nix::EvalState &State, nix::Value *Payload,
     Constraint.InStore = true;
     Constraint.AcceptsStringLike = true;
     HasConstraint = true;
+  } else if (LowerName == "path" && R.Description &&
+             toLowerCopy(*R.Description) == "absolute path") {
+    Constraint.Absolute = true;
+    Constraint.AcceptsStringLike = true;
+    HasConstraint = true;
   }
 
   if (Payload) {
+    bool SawStringLikePathPayload = false;
     if (std::optional<bool> Absolute = getBool(State, *Payload, "absolute")) {
       Constraint.Absolute = *Absolute;
       HasConstraint = true;
+      if (*Absolute)
+        SawStringLikePathPayload = true;
     }
     if (std::optional<bool> InStore = getBool(State, *Payload, "inStore")) {
       Constraint.InStore = *InStore;
+      if (*InStore) {
+        Constraint.Absolute = true;
+        SawStringLikePathPayload = true;
+      }
       HasConstraint = true;
     }
     if (std::optional<bool> AcceptsString =
             getBool(State, *Payload, "acceptsStringLike")) {
       Constraint.AcceptsStringLike = *AcceptsString;
       HasConstraint = true;
+      SawStringLikePathPayload = false;
     }
+    if (SawStringLikePathPayload)
+      Constraint.AcceptsStringLike = true;
   }
 
   if (HasConstraint)
@@ -416,14 +448,15 @@ void fillPayloadMetadata(nix::EvalState &State, nix::Value &VType,
   nix::Value *Payload = Functor ? getAttr(State, *Functor, "payload") : nullptr;
   if (!Payload)
     Payload = getAttr(State, VType, "payload");
-  if (!Payload)
-    return;
 
-  if (LowerName == "enum")
+  if (Payload && LowerName == "enum")
     fillEnumValues(State, *Payload, R);
 
   fillStringConstraint(State, Payload, R, LowerName);
   fillPathConstraint(State, Payload, R, LowerName);
+
+  if (!Payload)
+    return;
 
   if (Depth < MaxOptionTypeDepth) {
     if (nix::Value *FreeformType = getAttr(State, *Payload, "freeformType");
