@@ -1,5 +1,5 @@
 # RUN: nixd --lit-test \
-# RUN: --nixos-options-expr='let intType = { name = "int"; description = "signed integer"; }; strType = { name = "str"; description = "string"; }; boolType = { name = "bool"; description = "boolean"; }; freeModule = { name = "submodule"; description = "submodule"; nestedTypes.freeformType = boolType; getSubOptions = _: { known = { _type = "option"; type = intType; }; }; }; strictModule = { name = "submodule"; description = "submodule"; getSubOptions = _: { known = { _type = "option"; type = intType; }; }; }; requiredModule = { name = "submodule"; description = "submodule"; getSubOptions = _: { known = { _type = "option"; type = intType; default = 1; }; required = { _type = "option"; type = strType; required = true; }; }; }; in { services.example.ports = { _type = "option"; type = { name = "listOf"; description = "list of signed integer"; nestedTypes.elemType = intType; }; }; services.example.settings = { _type = "option"; type = { name = "attrsOf"; description = "attribute set of signed integer"; nestedTypes.elemType = intType; }; }; services.example.mode = { _type = "option"; type = { name = "enum"; description = "one of fast or slow"; functor.payload.values = [ "fast" "slow" ]; }; }; services.example.freeModule = { _type = "option"; type = freeModule; }; services.example.strictModule = { _type = "option"; type = strictModule; }; services.example.requiredModule = { _type = "option"; type = requiredModule; }; services.example.fn = { _type = "option"; type = { name = "functionTo"; description = "function that evaluates to signed integer"; nestedTypes.resultType = intType; }; }; services.example.store = { _type = "option"; type = { name = "pathInStore"; description = "store path"; functor.payload = {}; }; }; services.example.coerced = { _type = "option"; type = { name = "coercedTo"; description = "string coerced to signed integer"; nestedTypes.coercedType = strType; nestedTypes.finalType = intType; }; }; }' \
+# RUN: --nixos-options-expr='let intType = { name = "int"; description = "signed integer"; }; strType = { name = "str"; description = "string"; }; boolType = { name = "bool"; description = "boolean"; }; freeModule = { name = "submodule"; description = "submodule"; nestedTypes.freeformType = boolType; getSubOptions = _: { known = { _type = "option"; type = intType; }; }; }; strictModule = { name = "submodule"; description = "submodule"; getSubOptions = _: { known = { _type = "option"; type = intType; }; }; }; requiredModule = { name = "submodule"; description = "submodule"; getSubOptions = _: { known = { _type = "option"; type = intType; default = 1; }; required = { _type = "option"; type = strType; required = true; }; }; }; in { services.example.ports = { _type = "option"; type = { name = "listOf"; description = "list of signed integer"; nestedTypes.elemType = intType; }; }; services.example.settings = { _type = "option"; type = { name = "attrsOf"; description = "attribute set of signed integer"; nestedTypes.elemType = intType; }; }; services.example.mode = { _type = "option"; type = { name = "enum"; description = "one of fast or slow"; functor.payload.values = [ "fast" "slow" ]; }; }; services.example.freeModule = { _type = "option"; type = freeModule; }; services.example.strictModule = { _type = "option"; type = strictModule; }; services.example.requiredModule = { _type = "option"; type = requiredModule; }; services.example.configModule = { _type = "option"; type = requiredModule; }; services.example.fn = { _type = "option"; type = { name = "functionTo"; description = "function that evaluates to signed integer"; nestedTypes.resultType = intType; }; }; services.example.store = { _type = "option"; type = { name = "pathInStore"; description = "store path"; functor.payload = {}; }; }; services.example.coerced = { _type = "option"; type = { name = "coercedTo"; description = "string coerced to signed integer"; nestedTypes.coercedType = strType; nestedTypes.finalType = intType; }; }; }' \
 # RUN: < %s | FileCheck \
 # RUN: --implicit-check-not='value for option `services.example.ports[]` has type `integer`' \
 # RUN: %s
@@ -46,6 +46,13 @@ in
   services.example.requiredModule = {
     known = 1;
   };
+  services.example.configModule = {
+    config = {
+      known = "bad";
+      required = "ok";
+      mystery = true;
+    };
+  };
   services.example.fn = x: "bad";
   services.example.store = ./relative;
   services.example.coerced = false;
@@ -64,6 +71,10 @@ CHECK-DAG: "code": "option-unknown"
 CHECK-DAG: "message": "unknown option `services.example.strictModule.mystery`"
 CHECK-DAG: "code": "option-required-missing"
 CHECK-DAG: "message": "required option `services.example.requiredModule.required` is missing"
+CHECK-DAG: "message": "value for option `services.example.configModule.known` has type `string`, expected `int signed integer`"
+CHECK-DAG: "message": "unknown option `services.example.configModule.mystery`"
+CHECK-NOT: unknown option `services.example.configModule.config`
+CHECK-NOT: required option `services.example.configModule.required`
 CHECK-DAG: "message": "value for option `services.example.fn.<return>` has type `string`, expected `int signed integer`"
 CHECK-DAG: "message": "value for option `services.example.store` has type `path`, expected `pathInStore store path`"
 CHECK-DAG: "message": "value for option `services.example.coerced` has type `boolean`, expected `str string`"

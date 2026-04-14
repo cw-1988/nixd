@@ -224,6 +224,7 @@ ValidationResult validateSubmoduleAttrset(const OptionType &Type,
                                           const VariableLookupAnalysis *VLA) {
   ValidationResult Result = matchesResult();
   std::optional<OptionType> Freeform = nestedType(Type, "freeformType");
+  bool HasConfigAttrset = false;
   const bool CanProveUnknownSubOptions =
       Type.KnownSubOptionsComplete &&
       (!Type.NestedTypes.empty() || !Type.KnownSubOptions.empty()) &&
@@ -240,6 +241,7 @@ ValidationResult validateSubmoduleAttrset(const OptionType &Type,
 
     if (Name == "config" &&
         stripParens(*Attr.value()).kind() == Node::NK_ExprAttrs) {
+      HasConfigAttrset = true;
       ValidationResult Config = validateSubmoduleAttrset(
           Type, static_cast<const ExprAttrs &>(stripParens(*Attr.value())),
           *Attr.value(), Scope, PM, VLA);
@@ -284,7 +286,8 @@ ValidationResult validateSubmoduleAttrset(const OptionType &Type,
     }
   }
 
-  validateRequiredSubOptions(Type, Attrs, OriginalValue, Scope, Result);
+  if (!HasConfigAttrset)
+    validateRequiredSubOptions(Type, Attrs, OriginalValue, Scope, Result);
   return Result;
 }
 

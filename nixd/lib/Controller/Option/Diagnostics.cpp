@@ -108,6 +108,92 @@ bool isNestedInList(const Binding &Binding, const ParentMapAnalysis &PM) {
   return false;
 }
 
+bool bindingPathStartsWith(const Binding &Bind, std::string_view Name) {
+  const auto &Names = Bind.path().names();
+  if (Names.empty() || !Names.front() || !Names.front()->isStatic())
+    return false;
+  return Names.front()->staticName() == Name;
+}
+
+bool hasEnclosingBinding(const Binding &Bind, const ParentMapAnalysis &PM) {
+  const Node *Current = &Bind;
+  std::unordered_set<const Node *> Seen;
+  while (Current && Seen.insert(Current).second) {
+    const Node *Parent = PM.query(*Current);
+    if (!Parent)
+      return false;
+    if (Parent->kind() == Node::NK_Binding)
+      return true;
+    Current = Parent;
+  }
+  return false;
+}
+
+bool isNestedInConfigWrapper(const Binding &Bind,
+                             const ParentMapAnalysis &PM) {
+  const Node *Current = &Bind;
+  std::unordered_set<const Node *> Seen;
+  while (Current && Seen.insert(Current).second) {
+    if (Current->kind() == Node::NK_Binding) {
+      const auto &CurrentBinding = static_cast<const nixf::Binding &>(*Current);
+      if (bindingPathStartsWith(CurrentBinding, "config") &&
+          hasEnclosingBinding(CurrentBinding, PM))
+        return true;
+    }
+
+    const Node *Parent = PM.query(*Current);
+    if (!Parent)
+      return false;
+    Current = Parent;
+  }
+  return false;
+}
+
+std::optional<std::vector<std::string>>
+enclosingBindingScope(const Binding &Bind, const ParentMapAnalysis &PM) {
+  const Node *Current = &Bind;
+  std::unordered_set<const Node *> Seen;
+  while (Current && Seen.insert(Current).second) {
+    const Node *Parent = PM.query(*Current);
+    if (!Parent)
+      return std::nullopt;
+    if (Parent->kind() == Node::NK_Binding)
+      return findOptionBindingScope(static_cast<const nixf::Binding &>(*Parent),
+                                    PM);
+    Current = Parent;
+  }
+  return std::nullopt;
+}
+
+bool isProperPrefix(const std::vector<std::string> &Prefix,
+                    const std::vector<std::string> &Scope) {
+  return Prefix.size() < Scope.size() &&
+         std::equal(Prefix.begin(), Prefix.end(), Scope.begin());
+}
+
+bool isListContainerType(const OptionType &Type) {
+  const std::string LowerName = option_navigation::lowerTypeName(Type);
+  if (LowerName == "listof" || LowerName == "loaof" ||
+      option_navigation::isNonEmptyListType(Type))
+    return true;
+  if (LowerName == "nullor") {
+    if (std::optional<OptionType> Elem =
+            option_navigation::nullOrTypeFor(Type))
+      return isListContainerType(*Elem);
+  }
+  if (LowerName == "unique") {
+    if (std::optional<OptionType> Elem =
+            option_navigation::elemTypeFor(Type, LowerName))
+      return isListContainerType(*Elem);
+  }
+  for (const OptionType &Alternative :
+       option_navigation::alternativeTypesFor(Type, LowerName)) {
+    if (isListContainerType(Alternative))
+      return true;
+  }
+  return false;
+}
+
 std::optional<NixdDiagnostic> validateKnownOptionPath(
     const Binding &Binding, const ParentMapAnalysis &PM,
     const std::vector<std::string> &Scope, OptionDiagnosticContext &Context,
@@ -122,6 +208,31 @@ std::optional<NixdDiagnostic> validateKnownOptionPath(
   std::vector<std::string> ParentScope(Scope.begin(), Scope.end() - 1);
   const std::string &Leaf = Scope.back();
 
+  if (std::optional<std::vector<std::string>> Enclosing =
+          enclosingBindingScope(Binding, PM)) {
+    if (isProperPrefix(*Enclosing, Scope)) {
+      for (const ResolvedOptionInfo &Info :
+           resolveCached(Context, *Enclosing, Resolve)) {
+        if (Info.Description.Type &&
+            isListContainerType(*Info.Description.Type))
+          return std::nullopt;
+      }
+    }
+  }
+
+  for (size_t PrefixLen = 1; PrefixLen < Scope.size(); ++PrefixLen) {
+    std::vector<std::string> Prefix(Scope.begin(), Scope.begin() + PrefixLen);
+    for (const ResolvedOptionInfo &Info :
+         resolveCached(Context, Prefix, Resolve)) {
+      if (Info.Description.Type &&
+          option_navigation::hasDynamicAttrCoverage(*Info.Description.Type))
+        return std::nullopt;
+    }
+    if (Context.QueryLimitReached)
+      return std::nullopt;
+  }
+
+  bool HasClosedParentType = false;
   for (const ResolvedOptionInfo &Info :
        resolveCached(Context, ParentScope, Resolve)) {
     if (!Info.Description.Type)
@@ -130,6 +241,7 @@ std::optional<NixdDiagnostic> validateKnownOptionPath(
     if (!Type.KnownSubOptionsComplete ||
         option_navigation::hasDynamicAttrCoverage(Type))
       return std::nullopt;
+    HasClosedParentType = true;
   }
   if (Context.QueryLimitReached)
     return std::nullopt;
@@ -146,7 +258,7 @@ std::optional<NixdDiagnostic> validateKnownOptionPath(
       completeCached(Context, ParentScope, "", Complete);
   if (Context.QueryLimitReached)
     return std::nullopt;
-  if (SiblingFields.empty())
+  if (SiblingFields.empty() && !HasClosedParentType)
     return std::nullopt;
   for (const ResolvedOptionField &Field : SiblingFields)
     if (Field.Field.Name == Leaf)
@@ -170,6 +282,8 @@ validateOptionBinding(const Binding &Binding, const ParentMapAnalysis &PM,
   if (isLetDefinitionBinding(Binding, PM))
     return {};
   if (isNestedInList(Binding, PM))
+    return {};
+  if (isNestedInConfigWrapper(Binding, PM))
     return {};
 
   std::optional<std::vector<std::string>> Scope =
