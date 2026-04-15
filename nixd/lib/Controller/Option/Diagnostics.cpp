@@ -1,4 +1,5 @@
 #include "DiagnosticsSupport.h"
+#include "FlakeSchema.h"
 #include "Validation.h"
 #include "Navigation.h"
 #include "nixd/Controller/Controller.h"
@@ -149,6 +150,63 @@ bool isNestedInConfigWrapper(const Binding &Bind,
   return false;
 }
 
+std::optional<std::string> staticCalleeName(const Expr &Fn) {
+  if (Fn.kind() == Node::NK_ExprParen) {
+    const auto &Paren = static_cast<const ExprParen &>(Fn);
+    if (Paren.expr())
+      return staticCalleeName(*Paren.expr());
+    return std::nullopt;
+  }
+
+  if (Fn.kind() == Node::NK_ExprVar)
+    return static_cast<const ExprVar &>(Fn).id().name();
+
+  if (Fn.kind() != Node::NK_ExprSelect)
+    return std::nullopt;
+
+  const auto &Select = static_cast<const ExprSelect &>(Fn);
+  const AttrPath *Path = Select.path();
+  if (!Path || Path->names().empty())
+    return std::nullopt;
+
+  const AttrName *Last = Path->names().back().get();
+  if (!Last || !Last->isStatic())
+    return std::nullopt;
+  return Last->staticName();
+}
+
+bool isOptionDeclarationHelper(std::string_view Name) {
+  return Name == "mkOption" || Name == "mkEnableOption" ||
+         Name == "mkPackageOption";
+}
+
+bool isNestedInOptionDeclarationCall(const Binding &Bind,
+                                     const ParentMapAnalysis &PM) {
+  const Node *Current = &Bind;
+  std::unordered_set<const Node *> Seen;
+  while (Current && Seen.insert(Current).second) {
+    const Node *Parent = PM.query(*Current);
+    if (!Parent)
+      return false;
+
+    if (Current->kind() == Node::NK_ExprAttrs &&
+        Parent->kind() == Node::NK_ExprCall) {
+      const auto &Call = static_cast<const ExprCall &>(*Parent);
+      const bool IsArgument = std::any_of(
+          Call.args().begin(), Call.args().end(),
+          [&](const std::shared_ptr<Expr> &Arg) { return Arg.get() == Current; });
+      if (IsArgument) {
+        if (std::optional<std::string> Name = staticCalleeName(Call.fn());
+            Name && isOptionDeclarationHelper(*Name))
+          return true;
+      }
+    }
+
+    Current = Parent;
+  }
+  return false;
+}
+
 std::optional<std::vector<std::string>>
 enclosingBindingScope(const Binding &Bind, const ParentMapAnalysis &PM) {
   const Node *Current = &Bind;
@@ -254,6 +312,13 @@ std::optional<NixdDiagnostic> validateKnownOptionPath(
     if (Field.Field.Name == Leaf)
       return std::nullopt;
 
+  std::vector<ResolvedOptionField> ChildFields =
+      completeCached(Context, Scope, "", Complete);
+  if (Context.QueryLimitReached)
+    return std::nullopt;
+  if (!ChildFields.empty())
+    return std::nullopt;
+
   std::vector<ResolvedOptionField> SiblingFields =
       completeCached(Context, ParentScope, "", Complete);
   if (Context.QueryLimitReached)
@@ -270,6 +335,7 @@ std::optional<NixdDiagnostic> validateKnownOptionPath(
 std::vector<NixdDiagnostic>
 validateOptionBinding(const Binding &Binding, const ParentMapAnalysis &PM,
                       const VariableLookupAnalysis *VLA,
+                      bool IsFlakeSchema,
                       OptionDiagnosticContext &Context,
                       const std::function<std::vector<ResolvedOptionInfo>(
                           const std::vector<std::string> &)> &Resolve,
@@ -285,10 +351,16 @@ validateOptionBinding(const Binding &Binding, const ParentMapAnalysis &PM,
     return {};
   if (isNestedInConfigWrapper(Binding, PM))
     return {};
+  if (isNestedInOptionDeclarationCall(Binding, PM))
+    return {};
 
   std::optional<std::vector<std::string>> Scope =
       findOptionBindingScope(Binding, PM);
   if (!Scope)
+    return {};
+  if (IsFlakeSchema && flake_schema::isInsideOutputsBody(Binding, PM))
+    Scope = flake_schema::outputsBodyScope(*Scope);
+  if (!Scope->empty() && Scope->front() == "options")
     return {};
 
   std::vector<ResolvedOptionInfo> Infos =
@@ -323,6 +395,7 @@ validateOptionBinding(const Binding &Binding, const ParentMapAnalysis &PM,
 void collectOptionDiagnosticsFromNode(
     const Node &Desc, const ParentMapAnalysis &PM,
     const VariableLookupAnalysis *VLA, OptionDiagnosticContext &Context,
+    bool IsFlakeSchema,
     const std::function<std::vector<ResolvedOptionInfo>(
         const std::vector<std::string> &)> &Resolve,
     const std::function<std::vector<ResolvedOptionField>(
@@ -334,16 +407,16 @@ void collectOptionDiagnosticsFromNode(
 
   if (Desc.kind() == Node::NK_Binding) {
     std::vector<NixdDiagnostic> NewDiagnostics = validateOptionBinding(
-        static_cast<const Binding &>(Desc), PM, VLA, Context, Resolve,
-        Complete);
+        static_cast<const Binding &>(Desc), PM, VLA, IsFlakeSchema, Context,
+        Resolve, Complete);
     std::move(NewDiagnostics.begin(), NewDiagnostics.end(),
               std::back_inserter(Diagnostics));
   }
 
   for (const nixf::Node *Child : Desc.children()) {
     if (Child)
-      collectOptionDiagnosticsFromNode(*Child, PM, VLA, Context, Resolve,
-                                       Complete, Seen,
+      collectOptionDiagnosticsFromNode(*Child, PM, VLA, Context,
+                                       IsFlakeSchema, Resolve, Complete, Seen,
                                        Diagnostics);
   }
 }
@@ -379,28 +452,37 @@ bool hasRecoverySyntaxError(const NixTU &TU) {
 } // namespace
 
 std::vector<NixdDiagnostic>
-Controller::collectOptionDiagnostics(const NixTU &TU) {
+Controller::collectOptionDiagnostics(const NixTU &TU, std::string_view File) {
   std::vector<NixdDiagnostic> Diagnostics;
   if (!TU.ast() || !TU.parentMap())
     return Diagnostics;
   if (hasRecoverySyntaxError(TU))
     return Diagnostics;
-  if (!waitForOptionProvidersReadyForTests())
-    return Diagnostics;
-  if (!optionProvidersReadyForDiagnostics())
-    return Diagnostics;
+  const bool IsFlakeSchema = flake_schema::isFlakeFile(File);
+  if (!IsFlakeSchema) {
+    if (!waitForOptionProvidersReadyForTests())
+      return Diagnostics;
+    if (!optionProvidersReadyForDiagnostics())
+      return Diagnostics;
+  }
 
   OptionDiagnosticContext Context;
-  auto Resolve = [this](const std::vector<std::string> &Scope) {
+  auto Resolve = [this, IsFlakeSchema](
+                     const std::vector<std::string> &Scope) {
+    if (IsFlakeSchema)
+      return flake_schema::resolveDerived(Scope);
     return resolveDerivedOptionInfos(Scope);
   };
-  auto Complete = [this](const std::vector<std::string> &Scope,
-                         const std::string &Prefix) {
+  auto Complete = [this, IsFlakeSchema](const std::vector<std::string> &Scope,
+                                        const std::string &Prefix) {
+    if (IsFlakeSchema)
+      return flake_schema::completeDerived(Scope, Prefix);
     return completeDerivedOptions(Scope, Prefix);
   };
   std::unordered_set<const Node *> Seen;
   collectOptionDiagnosticsFromNode(*TU.ast(), *TU.parentMap(),
-                                   TU.variableLookup(), Context, Resolve,
-                                   Complete, Seen, Diagnostics);
+                                   TU.variableLookup(), Context,
+                                   IsFlakeSchema, Resolve, Complete, Seen,
+                                   Diagnostics);
   return dedupeDiagnostics(std::move(Diagnostics));
 }

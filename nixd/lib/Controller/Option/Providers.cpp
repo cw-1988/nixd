@@ -1,4 +1,5 @@
 #include "nixd/Controller/Controller.h"
+#include "FlakeSchema.h"
 #include "Navigation.h"
 
 #include <boost/asio/post.hpp>
@@ -412,14 +413,38 @@ Controller::completeDerivedOptions(const std::vector<std::string> &Scope,
   return OptService.completeDerived(optionProviderSnapshot(), Scope, Prefix);
 }
 
+std::vector<ResolvedOptionField>
+Controller::completeDerivedOptionsForFile(
+    std::string_view File, const std::vector<std::string> &Scope,
+    const std::string &Prefix) {
+  if (flake_schema::isFlakeFile(File))
+    return flake_schema::completeDerived(Scope, Prefix);
+  return completeDerivedOptions(Scope, Prefix);
+}
+
 std::vector<ResolvedOptionInfo>
 Controller::resolveOptionInfos(const std::vector<std::string> &Scope) {
   return OptService.resolve(optionProviderSnapshot(), Scope);
 }
 
 std::vector<ResolvedOptionInfo>
+Controller::resolveOptionInfosForFile(std::string_view File,
+                                      const std::vector<std::string> &Scope) {
+  if (flake_schema::isFlakeFile(File))
+    return flake_schema::resolve(Scope);
+  return resolveOptionInfos(Scope);
+}
+
+std::vector<ResolvedOptionInfo>
 Controller::resolveDerivedOptionInfos(const std::vector<std::string> &Scope) {
   return OptService.resolveDerived(optionProviderSnapshot(), Scope);
+}
+
+std::vector<ResolvedOptionInfo> Controller::resolveDerivedOptionInfosForFile(
+    std::string_view File, const std::vector<std::string> &Scope) {
+  if (flake_schema::isFlakeFile(File))
+    return flake_schema::resolveDerived(Scope);
+  return resolveDerivedOptionInfos(Scope);
 }
 
 std::vector<lspserver::Location>

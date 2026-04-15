@@ -49,6 +49,7 @@ libnixd_lib = library(
     'Controller/Option/Diagnostics.cpp',
     'Controller/Option/DiagnosticsSchedule.cpp',
     'Controller/Option/DiagnosticsSupport.cpp',
+    'Controller/Option/FlakeSchema.cpp',
     'Controller/Option/Integer.cpp',
     'Controller/Option/Navigation.cpp',
     'Controller/Option/Providers.cpp',

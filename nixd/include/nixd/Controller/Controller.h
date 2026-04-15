@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <set>
+#include <string_view>
 #include <utility>
 
 namespace nixd {
@@ -284,15 +285,26 @@ private:
   completeOptions(const std::vector<std::string> &Scope,
                   const std::string &Prefix);
   std::vector<ResolvedOptionField>
+  completeDerivedOptionsForFile(std::string_view File,
+                                const std::vector<std::string> &Scope,
+                                const std::string &Prefix);
+  std::vector<ResolvedOptionField>
   completeDerivedOptions(const std::vector<std::string> &Scope,
                          const std::string &Prefix);
   std::vector<ResolvedOptionInfo>
+  resolveOptionInfosForFile(std::string_view File,
+                            const std::vector<std::string> &Scope);
+  std::vector<ResolvedOptionInfo>
   resolveOptionInfos(const std::vector<std::string> &Scope);
+  std::vector<ResolvedOptionInfo>
+  resolveDerivedOptionInfosForFile(std::string_view File,
+                                   const std::vector<std::string> &Scope);
   std::vector<ResolvedOptionInfo>
   resolveDerivedOptionInfos(const std::vector<std::string> &Scope);
   std::vector<lspserver::Location>
   optionDeclarationLocations(const std::vector<std::string> &Scope);
-  std::vector<NixdDiagnostic> collectOptionDiagnostics(const NixTU &TU);
+  std::vector<NixdDiagnostic> collectOptionDiagnostics(const NixTU &TU,
+                                                       std::string_view File);
   void scheduleOptionDiagnostics(lspserver::PathRef File,
                                  std::optional<int64_t> Version,
                                  std::shared_ptr<NixTU> TU);

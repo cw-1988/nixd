@@ -16,7 +16,8 @@ void Controller::scheduleOptionDiagnostics(lspserver::PathRef File,
                                            std::shared_ptr<NixTU> TU) {
   postToDiagnosticsPool(
       [this, File = File.str(), Version, TU = std::move(TU)]() mutable {
-        std::vector<NixdDiagnostic> Diagnostics = collectOptionDiagnostics(*TU);
+        std::vector<NixdDiagnostic> Diagnostics =
+            collectOptionDiagnostics(*TU, File);
         {
           std::lock_guard _(TUsLock);
           auto It = TUs.find(File);
@@ -39,7 +40,8 @@ void Controller::refreshDiagnostics() {
   }
 
   for (const auto &[File, TU] : Snapshot) {
-    std::vector<NixdDiagnostic> Diagnostics = collectOptionDiagnostics(*TU);
+    std::vector<NixdDiagnostic> Diagnostics =
+        collectOptionDiagnostics(*TU, File);
     {
       std::lock_guard _(TUsLock);
       auto It = TUs.find(File);

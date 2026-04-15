@@ -10,6 +10,7 @@
 #include "Completion/Select.h"
 #include "Completion/Variables.h"
 #include "Convert.h"
+#include "Option/FlakeSchema.h"
 
 #include "lspserver/Protocol.h"
 
@@ -36,6 +37,7 @@ void Controller::onCompletion(const CompletionParams &Params,
   auto Action = [Reply = std::move(Reply), URI = Params.textDocument.uri,
                  Pos = toNixfPosition(Params.position), this]() mutable {
     const auto File = URI.file().str();
+    const bool UsesFlakeSchema = flake_schema::isFlakeFile(File);
     return Reply([&]() -> llvm::Expected<CompletionList> {
       const auto TU = CheckDefault(getTU(File));
       const auto AST = CheckDefault(getAST(*TU));
@@ -50,18 +52,42 @@ void Controller::onCompletion(const CompletionParams &Params,
         CompletionList List;
         const VariableLookupAnalysis &VLA = *TU->variableLookup();
         try {
+          const auto &UpExpr = *CheckDefault(PM.upExpr(N));
+          const bool InFlakeOutputsBody =
+              UsesFlakeSchema && flake_schema::isInsideOutputsBody(N, PM);
+
+          if (UpExpr.kind() == Node::NK_ExprAttrs) {
+            if (std::optional<AttrPathCompleteParams> Params =
+                    completion::optionAttrPathCompletionParams(N, PM)) {
+              std::vector<std::string> Scope =
+                  InFlakeOutputsBody
+                      ? flake_schema::outputsBodyScope(Params->Scope)
+                      : Params->Scope;
+              if (UsesFlakeSchema || waitForOptionProvidersReadyForTests())
+                completion::completeOptionNames(
+                    completeDerivedOptionsForFile(File, Scope, Params->Prefix),
+                    ClientCaps.CompletionSnippets, List.items);
+              if (!List.items.empty())
+                return List;
+            }
+          }
+
           if (std::optional<OptionValueContext> Context =
                   findOptionValueContext(N, PM, Pos)) {
-            if (waitForOptionProvidersReadyForTests())
+            OptionValueContext ValueContext = *Context;
+            if (InFlakeOutputsBody)
+              ValueContext.Scope =
+                  flake_schema::outputsBodyScope(ValueContext.Scope);
+            if (UsesFlakeSchema || waitForOptionProvidersReadyForTests())
               completion::completeOptionValue(
-                  *Context, resolveDerivedOptionInfos(Context->Scope),
+                  ValueContext,
+                  resolveDerivedOptionInfosForFile(File, ValueContext.Scope),
                   ClientCaps.CompletionSnippets, nixpkgsClient(), TU->src(),
                   List.items);
             if (!List.items.empty())
               return List;
           }
 
-          const auto &UpExpr = *CheckDefault(PM.upExpr(N));
           switch (UpExpr.kind()) {
           // In these cases, assume the cursor have "variable" scoping.
           case Node::NK_ExprVar: {
@@ -81,13 +107,6 @@ void Controller::onCompletion(const CompletionParams &Params,
             return List;
           }
           case Node::NK_ExprAttrs: {
-            if (std::optional<AttrPathCompleteParams> Params =
-                    completion::optionAttrPathCompletionParams(N, PM)) {
-              if (waitForOptionProvidersReadyForTests())
-                completion::completeOptionNames(
-                    completeDerivedOptions(Params->Scope, Params->Prefix),
-                    ClientCaps.CompletionSnippets, List.items);
-            }
             return List;
           }
           default:
