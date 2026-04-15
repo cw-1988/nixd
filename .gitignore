@@ -4,6 +4,7 @@
 
 .local/
 .clangd
+.vscode/
 
 __pycache__
 
