@@ -150,6 +150,46 @@ bool isNestedInConfigWrapper(const Binding &Bind,
   return false;
 }
 
+bool isDirectBindingValue(const Node &Value, const ParentMapAnalysis &PM) {
+  const Node *Current = &Value;
+  std::unordered_set<const Node *> Seen;
+  while (Current && Seen.insert(Current).second) {
+    const Node *Parent = PM.query(*Current);
+    if (!Parent)
+      return false;
+
+    if (Parent->kind() == Node::NK_Binding) {
+      const auto &Bind = static_cast<const nixf::Binding &>(*Parent);
+      return Bind.value().get() == Current;
+    }
+
+    if (Parent->kind() != Node::NK_ExprParen)
+      return false;
+    Current = Parent;
+  }
+  return false;
+}
+
+bool isNestedInOptionValueLambda(const Binding &Bind,
+                                 const ParentMapAnalysis &PM) {
+  const Node *Current = &Bind;
+  std::unordered_set<const Node *> Seen;
+  while (Current && Seen.insert(Current).second) {
+    const Node *Parent = PM.query(*Current);
+    if (!Parent)
+      return false;
+
+    if (Parent->kind() == Node::NK_ExprLambda) {
+      const auto &Lambda = static_cast<const ExprLambda &>(*Parent);
+      if (Lambda.body() == Current && isDirectBindingValue(*Parent, PM))
+        return true;
+    }
+
+    Current = Parent;
+  }
+  return false;
+}
+
 std::optional<std::string> staticCalleeName(const Expr &Fn) {
   if (Fn.kind() == Node::NK_ExprParen) {
     const auto &Paren = static_cast<const ExprParen &>(Fn);
@@ -350,6 +390,8 @@ validateOptionBinding(const Binding &Binding, const ParentMapAnalysis &PM,
   if (isNestedInList(Binding, PM))
     return {};
   if (isNestedInConfigWrapper(Binding, PM))
+    return {};
+  if (isNestedInOptionValueLambda(Binding, PM))
     return {};
   if (isNestedInOptionDeclarationCall(Binding, PM))
     return {};
