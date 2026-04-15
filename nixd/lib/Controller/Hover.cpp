@@ -8,6 +8,8 @@
 #include "Convert.h"
 
 #include "nixd/Controller/Controller.h"
+#include "Option/FlakeSchema.h"
+#include "Option/Navigation.h"
 #include "nixd/Protocol/AttrSet.h"
 
 #include <boost/asio/post.hpp>
@@ -15,7 +17,9 @@
 #include <llvm/Support/Error.h>
 
 #include <semaphore>
+#include <set>
 #include <sstream>
+#include <vector>
 
 using namespace nixd;
 using namespace llvm::json;
@@ -47,6 +51,162 @@ public:
     return Desc;
   }
 };
+
+std::string renderOptionTypeInline(const OptionType &Type) {
+  std::ostringstream OS;
+  if (Type.Name)
+    OS << "`" << *Type.Name << "`";
+  if (Type.Description) {
+    if (OS.tellp() > 0)
+      OS << " - ";
+    OS << *Type.Description;
+  }
+  return OS.str();
+}
+
+bool shouldHideSubOption(std::string_view Name) {
+  return Name.starts_with("_");
+}
+
+void appendSubOptionList(std::ostringstream &OS, const OptionType &Type,
+                         std::string_view Heading) {
+  bool WroteHeading = false;
+  for (const auto &[Name, Summary] : Type.KnownSubOptions) {
+    if (shouldHideSubOption(Name))
+      continue;
+
+    if (!WroteHeading) {
+      OS << "\n\n## " << Heading << "\n\n";
+      WroteHeading = true;
+    }
+
+    OS << "- `" << Name << "`";
+    if (auto It = Type.NestedTypes.find(Name); It != Type.NestedTypes.end()) {
+      const std::string Rendered = renderOptionTypeInline(It->second);
+      if (!Rendered.empty())
+        OS << ": " << Rendered;
+    }
+
+    std::vector<std::string_view> Flags;
+    if (Summary.Required)
+      Flags.emplace_back("required");
+    if (Summary.HasDefault)
+      Flags.emplace_back("default");
+    if (Summary.HasEmptyValue)
+      Flags.emplace_back("empty value");
+    if (!Flags.empty()) {
+      OS << " (";
+      for (size_t I = 0; I < Flags.size(); ++I) {
+        if (I)
+          OS << ", ";
+        OS << Flags[I];
+      }
+      OS << ")";
+    }
+    OS << "\n";
+  }
+
+  if (!Type.KnownSubOptionsComplete) {
+    if (!WroteHeading) {
+      OS << "\n\n## " << Heading << "\n\n";
+      WroteHeading = true;
+    }
+    OS << "- ...\n";
+  }
+}
+
+void appendNestedSubOptions(std::ostringstream &OS, const OptionType &Type,
+                            std::string_view Heading, unsigned Depth,
+                            std::set<std::string> &Seen) {
+  if (Depth > 4)
+    return;
+
+  const std::string Fingerprint =
+      std::string(Heading) + "\n" + Type.Name.value_or("") + "\n" +
+      Type.Description.value_or("");
+  std::string RichFingerprint = Fingerprint;
+  for (const auto &[Name, Summary] : Type.KnownSubOptions) {
+    (void)Summary;
+    RichFingerprint += "\nsub:" + Name;
+  }
+  for (const auto &[Name, Child] : Type.NestedTypes) {
+    (void)Child;
+    RichFingerprint += "\ntype:" + Name;
+  }
+  if (!Seen.insert(RichFingerprint).second)
+    return;
+
+  if (!Type.KnownSubOptions.empty() || !Type.KnownSubOptionsComplete)
+    appendSubOptionList(OS, Type, Heading);
+
+  const std::string LowerName = option_navigation::lowerTypeName(Type);
+
+  if (LowerName == "nullor" || LowerName == "unique") {
+    std::optional<OptionType> Elem =
+        LowerName == "nullor"
+            ? option_navigation::nullOrTypeFor(Type)
+            : option_navigation::elemTypeFor(Type, LowerName);
+    if (Elem)
+      appendNestedSubOptions(OS, *Elem, Heading, Depth + 1, Seen);
+    return;
+  }
+
+  if (LowerName == "listof" || option_navigation::isNonEmptyListType(Type)) {
+    if (std::optional<OptionType> Elem =
+            option_navigation::elemTypeFor(Type, LowerName))
+      appendNestedSubOptions(OS, *Elem, "Element Options", Depth + 1, Seen);
+    return;
+  }
+
+  if (LowerName == "loaof") {
+    if (std::optional<OptionType> Elem =
+            option_navigation::elemTypeFor(Type, LowerName))
+      appendNestedSubOptions(OS, *Elem, "Element Options", Depth + 1, Seen);
+    return;
+  }
+
+  if (LowerName == "functionto") {
+    if (std::optional<OptionType> Result =
+            option_navigation::functionResultTypeFor(Type))
+      appendNestedSubOptions(OS, *Result, "Result Options", Depth + 1, Seen);
+    return;
+  }
+
+  if (LowerName == "attrsof" || LowerName == "lazyattrsof" ||
+      LowerName == "attrswith") {
+    if (std::optional<OptionType> Elem =
+            option_navigation::elemTypeFor(Type, LowerName))
+      appendNestedSubOptions(OS, *Elem, "Attribute Options", Depth + 1, Seen);
+    return;
+  }
+
+  for (const OptionType &Alternative :
+       option_navigation::alternativeTypesFor(Type, LowerName))
+    appendNestedSubOptions(OS, Alternative, "Alternative Options", Depth + 1,
+                           Seen);
+}
+
+std::string mkOptionMarkdown(const OptionDescription &Desc) {
+  std::ostringstream OS;
+
+  OS << "## Type\n\n";
+  if (Desc.Type) {
+    const std::string Rendered = renderOptionTypeInline(*Desc.Type);
+    OS << (Rendered.empty() ? "? (missing type)" : Rendered);
+  } else {
+    OS << "? (missing type)";
+  }
+
+  if (Desc.Description)
+    OS << "\n\n## Description\n\n" << *Desc.Description;
+
+  if (Desc.Type) {
+    std::set<std::string> Seen;
+    appendNestedSubOptions(OS, *Desc.Type, "Options", 0, Seen);
+  }
+
+  return OS.str();
+}
 
 /// \brief Provide package information, library information ... , from nixpkgs.
 class NixpkgsHoverProvider {
@@ -218,6 +378,29 @@ void Controller::onHover(const TextDocumentPositionParams &Params,
 
       const auto &UpExpr = *CheckDefault(PM.upExpr(N));
 
+      if (UpExpr.kind() == Node::NK_ExprAttrs) {
+        auto Scope = std::vector<std::string>();
+        const auto R = findAttrPathForOptions(N, PM, Scope);
+        if (R == FindAttrPathResult::OK) {
+          if (flake_schema::isFlakeFile(File) &&
+              flake_schema::isInsideOutputsBody(N, PM))
+            Scope = flake_schema::outputsBodyScope(Scope);
+          for (const ResolvedOptionInfo &Info :
+               resolveDerivedOptionInfosForFile(File, Scope)) {
+            const OptionDescription &Desc = Info.Description;
+            std::string Docs = mkOptionMarkdown(Desc);
+            return Hover{
+                .contents =
+                    MarkupContent{
+                        .kind = MarkupKind::Markdown,
+                        .value = std::move(Docs),
+                    },
+                .range = toLSPRange(TU->src(), N.range()),
+            };
+          }
+        }
+      }
+
       // Try to get hover info from nixpkgs.
       if (auto *Client = nixpkgsClient(); Client) {
         switch (UpExpr.kind()) {
@@ -231,35 +414,6 @@ void Controller::onHover(const TextDocumentPositionParams &Params,
           const auto &Sel = static_cast<const ExprSelect &>(UpExpr);
           if (auto H = hoverSelect(Sel, VLA, PM, *Client, TU->src()))
             return *H;
-          break;
-        }
-        case Node::NK_ExprAttrs: {
-          // Try to get hover info from options.
-          auto Scope = std::vector<std::string>();
-          const auto R = findAttrPathForOptions(N, PM, Scope);
-          if (R == FindAttrPathResult::OK) {
-            for (const ResolvedOptionInfo &Info : resolveOptionInfos(Scope)) {
-              const OptionDescription &Desc = Info.Description;
-              std::string Docs;
-              if (Desc.Type) {
-                std::string TypeName = Desc.Type->Name.value_or("");
-                std::string TypeDesc = Desc.Type->Description.value_or("");
-                Docs += llvm::formatv("{0} ({1})", TypeName, TypeDesc);
-              } else {
-                Docs += "? (missing type)";
-              }
-              if (Desc.Description)
-                Docs += "\n\n" + Desc.Description.value_or("");
-              return Hover{
-                  .contents =
-                      MarkupContent{
-                          .kind = MarkupKind::Markdown,
-                          .value = std::move(Docs),
-                      },
-                  .range = toLSPRange(TU->src(), N.range()),
-              };
-            }
-          }
           break;
         }
         default:

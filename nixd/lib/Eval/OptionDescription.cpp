@@ -442,6 +442,47 @@ void fillSubmoduleOptions(nix::EvalState &State, nix::Value &VType,
   }
 }
 
+bool isElementContainerType(std::string_view LowerName) {
+  return LowerName == "listof" || LowerName == "loaof" ||
+         LowerName == "attrsof" || LowerName == "lazyattrsof" ||
+         LowerName == "attrswith";
+}
+
+void fillElementSubOptions(nix::EvalState &State, nix::Value &VType,
+                           OptionType &R, int Depth,
+                           std::string_view LowerName) {
+  if (!isElementContainerType(LowerName) || Depth >= MaxOptionTypeDepth)
+    return;
+
+  std::optional<nix::Value> SubOptions;
+  try {
+    SubOptions = callGetSubOptions(State, VType);
+  } catch (const std::exception &) {
+    return;
+  }
+  if (!SubOptions)
+    return;
+
+  auto It = R.NestedTypes.find("elemType");
+  if (It != R.NestedTypes.end()) {
+    try {
+      fillSubmoduleOptionTree(State, *SubOptions, It->second, Depth + 1);
+    } catch (const std::exception &) {
+      It->second.KnownSubOptionsComplete = false;
+    }
+    return;
+  }
+
+  OptionType Elem;
+  try {
+    fillSubmoduleOptionTree(State, *SubOptions, Elem, Depth + 1);
+  } catch (const std::exception &) {
+    Elem.KnownSubOptionsComplete = false;
+  }
+  if (hasUsableTypeMetadata(Elem))
+    R.NestedTypes.emplace("elemType", std::move(Elem));
+}
+
 void fillPayloadMetadata(nix::EvalState &State, nix::Value &VType,
                          OptionType &R, int Depth, std::string_view LowerName) {
   nix::Value *Functor = getAttr(State, VType, "functor");
@@ -480,6 +521,10 @@ void fillOptionType(nix::EvalState &State, nix::Value &VType, OptionType &R,
   }
   try {
     fillPayloadMetadata(State, VType, R, Depth, LowerName);
+  } catch (const std::exception &) {
+  }
+  try {
+    fillElementSubOptions(State, VType, R, Depth, LowerName);
   } catch (const std::exception &) {
   }
   if (LowerName == "submodule" || LowerName == "submodulewith") {

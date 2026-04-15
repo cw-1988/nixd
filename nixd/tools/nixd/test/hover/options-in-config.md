@@ -50,7 +50,7 @@ CHECK-NEXT:  "jsonrpc": "2.0",
 CHECK-NEXT:  "result": {
 CHECK-NEXT:    "contents": {
 CHECK-NEXT:      "kind": "markdown",
-CHECK-NEXT:      "value": " (test type)\n\ntest option"
+CHECK-NEXT:      "value": "## Type\n\ntest type\n\n## Description\n\ntest option"
 CHECK-NEXT:    },
 CHECK-NEXT:    "range": {
 CHECK-NEXT:      "end": {
