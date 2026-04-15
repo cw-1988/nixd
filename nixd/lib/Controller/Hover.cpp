@@ -7,15 +7,17 @@
 #include "CheckReturn.h"
 #include "Convert.h"
 
-#include "nixd/Controller/Controller.h"
 #include "Option/FlakeSchema.h"
 #include "Option/Navigation.h"
+#include "nixd/Controller/Controller.h"
 #include "nixd/Protocol/AttrSet.h"
 
 #include <boost/asio/post.hpp>
 
 #include <llvm/Support/Error.h>
 
+#include <algorithm>
+#include <optional>
 #include <semaphore>
 #include <set>
 #include <sstream>
@@ -66,6 +68,181 @@ std::string renderOptionTypeInline(const OptionType &Type) {
 
 bool shouldHideSubOption(std::string_view Name) {
   return Name.starts_with("_");
+}
+
+std::string mkOptionMarkdown(const OptionDescription &Desc);
+
+std::optional<std::vector<std::string>>
+staticAttrPathPrefix(const Node &N, const ParentMapAnalysis &PM) {
+  const Node *NameNode = PM.upTo(N, Node::NK_AttrName);
+  if (!NameNode)
+    return std::nullopt;
+
+  const Node *PathNode = PM.query(*NameNode);
+  if (!PathNode || PathNode->kind() != Node::NK_AttrPath)
+    return std::nullopt;
+
+  const auto &Path = static_cast<const AttrPath &>(*PathNode);
+  std::vector<std::string> Prefix;
+  for (const auto &Name : Path.names()) {
+    if (!Name || !Name->isStatic())
+      return std::nullopt;
+    Prefix.emplace_back(Name->staticName());
+    if (Name.get() == NameNode)
+      return Prefix;
+  }
+
+  return std::nullopt;
+}
+
+std::optional<std::vector<std::string>>
+staticBindingPath(const Binding &Binding) {
+  std::vector<std::string> Path;
+  for (const auto &Name : Binding.path().names()) {
+    if (!Name || !Name->isStatic())
+      return std::nullopt;
+    Path.emplace_back(Name->staticName());
+  }
+  if (Path.empty())
+    return std::nullopt;
+  return Path;
+}
+
+bool isListElementChild(const ExprList &List, const Node &Child) {
+  for (const auto &Element : List.elements())
+    if (Element.get() == &Child)
+      return true;
+  return false;
+}
+
+const Node *enclosingBindingNode(const Binding &Binding,
+                                 const ParentMapAnalysis &PM) {
+  const Node *Current = PM.query(Binding);
+  std::set<const Node *> Seen{&Binding};
+  while (Current && Seen.insert(Current).second) {
+    if (Current->kind() == Node::NK_Binding)
+      return Current;
+    Current = PM.query(*Current);
+  }
+  return nullptr;
+}
+
+bool isPrefixOrEqual(const std::vector<std::string> &Prefix,
+                     const std::vector<std::string> &Scope) {
+  return Prefix.size() <= Scope.size() &&
+         std::equal(Prefix.begin(), Prefix.end(), Scope.begin());
+}
+
+struct OptionFieldHoverContext {
+  std::vector<std::string> Scope;
+  std::vector<option_navigation::ChildStep> ValuePath;
+};
+
+std::optional<OptionFieldHoverContext>
+findOptionFieldHoverContext(const Node &N, const ParentMapAnalysis &PM) {
+  std::optional<std::vector<std::string>> AttrPrefix =
+      staticAttrPathPrefix(N, PM);
+  if (!AttrPrefix || AttrPrefix->empty())
+    return std::nullopt;
+
+  const Node *BindingNode = PM.upTo(N, Node::NK_Binding);
+  if (!BindingNode)
+    return std::nullopt;
+
+  const Node *Current = PM.upExpr(N);
+  if (!Current)
+    return std::nullopt;
+
+  const Binding *SelectedBinding = nullptr;
+  std::vector<std::string> SelectedScope;
+  std::set<const Node *> SeenBindings;
+  while (BindingNode && SeenBindings.insert(BindingNode).second) {
+    const auto &Binding = static_cast<const nixf::Binding &>(*BindingNode);
+    if (std::optional<std::vector<std::string>> Scope =
+            findOptionBindingScope(Binding, PM)) {
+      if (!SelectedBinding) {
+        SelectedBinding = &Binding;
+        SelectedScope = std::move(*Scope);
+      } else if (!isPrefixOrEqual(*Scope, SelectedScope)) {
+        SelectedBinding = &Binding;
+        SelectedScope = std::move(*Scope);
+      } else {
+        break;
+      }
+    }
+
+    BindingNode = enclosingBindingNode(Binding, PM);
+  }
+
+  if (!SelectedBinding || !SelectedBinding->value())
+    return std::nullopt;
+
+  const Expr *OuterValue = SelectedBinding->value().get();
+  std::vector<option_navigation::ChildStep> ReversedPath;
+  while (Current && Current != OuterValue) {
+    if (PM.isRoot(*Current))
+      break;
+    const Node *Parent = PM.query(*Current);
+    if (!Parent)
+      break;
+
+    if (Parent->kind() == Node::NK_ExprList &&
+        isListElementChild(static_cast<const ExprList &>(*Parent), *Current)) {
+      ReversedPath.push_back(option_navigation::ChildStep{
+          .Kind = option_navigation::ChildKind::ListElement});
+    } else if (Parent->kind() == Node::NK_Binding &&
+               Parent != SelectedBinding &&
+               static_cast<const Binding *>(Parent)->value().get() == Current) {
+      if (std::optional<std::vector<std::string>> Path =
+              staticBindingPath(static_cast<const Binding &>(*Parent))) {
+        for (auto It = Path->rbegin(); It != Path->rend(); ++It)
+          ReversedPath.push_back(option_navigation::ChildStep{
+              .Kind = option_navigation::ChildKind::AttrValue, .Name = *It});
+      }
+    } else if (Parent->kind() == Node::NK_ExprLambda &&
+               static_cast<const ExprLambda *>(Parent)->body() == Current) {
+      ReversedPath.push_back(option_navigation::ChildStep{
+          .Kind = option_navigation::ChildKind::FunctionBody});
+    }
+
+    Current = Parent;
+  }
+
+  std::reverse(ReversedPath.begin(), ReversedPath.end());
+  for (const std::string &Name : *AttrPrefix)
+    ReversedPath.push_back(option_navigation::ChildStep{
+        .Kind = option_navigation::ChildKind::AttrValue, .Name = Name});
+
+  return OptionFieldHoverContext{.Scope = std::move(SelectedScope),
+                                 .ValuePath = std::move(ReversedPath)};
+}
+
+std::optional<Hover> hoverOptionValueField(
+    const Node &N, llvm::StringRef Src,
+    const std::vector<option_navigation::ChildStep> &ValuePath,
+    const std::vector<ResolvedOptionInfo> &BaseOptionInfos) {
+  for (const ResolvedOptionInfo &Info : BaseOptionInfos) {
+    if (!Info.Description.Type)
+      continue;
+
+    std::vector<OptionType> Expected =
+        option_navigation::descendValuePath(*Info.Description.Type, ValuePath);
+    for (OptionType &Type : Expected) {
+      OptionDescription Desc;
+      Desc.Type = std::move(Type);
+      std::string Docs = mkOptionMarkdown(Desc);
+      return Hover{
+          .contents =
+              MarkupContent{
+                  .kind = MarkupKind::Markdown,
+                  .value = std::move(Docs),
+              },
+          .range = toLSPRange(Src, N.range()),
+      };
+    }
+  }
+
+  return std::nullopt;
 }
 
 void appendSubOptionList(std::ostringstream &OS, const OptionType &Type,
@@ -121,9 +298,9 @@ void appendNestedSubOptions(std::ostringstream &OS, const OptionType &Type,
   if (Depth > 4)
     return;
 
-  const std::string Fingerprint =
-      std::string(Heading) + "\n" + Type.Name.value_or("") + "\n" +
-      Type.Description.value_or("");
+  const std::string Fingerprint = std::string(Heading) + "\n" +
+                                  Type.Name.value_or("") + "\n" +
+                                  Type.Description.value_or("");
   std::string RichFingerprint = Fingerprint;
   for (const auto &[Name, Summary] : Type.KnownSubOptions) {
     (void)Summary;
@@ -143,9 +320,8 @@ void appendNestedSubOptions(std::ostringstream &OS, const OptionType &Type,
 
   if (LowerName == "nullor" || LowerName == "unique") {
     std::optional<OptionType> Elem =
-        LowerName == "nullor"
-            ? option_navigation::nullOrTypeFor(Type)
-            : option_navigation::elemTypeFor(Type, LowerName);
+        LowerName == "nullor" ? option_navigation::nullOrTypeFor(Type)
+                              : option_navigation::elemTypeFor(Type, LowerName);
     if (Elem)
       appendNestedSubOptions(OS, *Elem, Heading, Depth + 1, Seen);
     return;
@@ -398,6 +574,17 @@ void Controller::onHover(const TextDocumentPositionParams &Params,
                 .range = toLSPRange(TU->src(), N.range()),
             };
           }
+        }
+
+        if (std::optional<OptionFieldHoverContext> Context =
+                findOptionFieldHoverContext(N, PM)) {
+          if (flake_schema::isFlakeFile(File) &&
+              flake_schema::isInsideOutputsBody(N, PM))
+            Context->Scope = flake_schema::outputsBodyScope(Context->Scope);
+          if (std::optional<Hover> H = hoverOptionValueField(
+                  N, TU->src(), Context->ValuePath,
+                  resolveDerivedOptionInfosForFile(File, Context->Scope)))
+            return *H;
         }
       }
 
