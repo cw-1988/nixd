@@ -59,20 +59,41 @@ bool nixd::fromJSON(const Value &Params, OptionType::StringConstraint &R,
 }
 
 Value nixd::toJSON(const OptionType::PathConstraint &Params) {
-  return Object{
-      {"Absolute", Params.Absolute},
-      {"InStore", Params.InStore},
-      {"AcceptsStringLike", Params.AcceptsStringLike},
-  };
+  Object Result{{"AcceptsStringLike", Params.AcceptsStringLike}};
+  if (Params.Absolute)
+    Result.try_emplace("Absolute", *Params.Absolute);
+  if (Params.InStore)
+    Result.try_emplace("InStore", *Params.InStore);
+  return Result;
 }
 
 bool nixd::fromJSON(const Value &Params, OptionType::PathConstraint &R,
                     Path P) {
-  ObjectMapper O(Params, P);
-  return O                                        //
-         && O.mapOptional("Absolute", R.Absolute) //
-         && O.mapOptional("InStore", R.InStore)   //
-         && O.mapOptional("AcceptsStringLike", R.AcceptsStringLike);
+  const Object *O = Params.getAsObject();
+  if (!O) {
+    P.report("expected object");
+    return false;
+  }
+
+  if (const Value *Absolute = O->get("Absolute")) {
+    if (std::optional<bool> V = Absolute->getAsBoolean())
+      R.Absolute = *V;
+    else
+      return false;
+  }
+  if (const Value *InStore = O->get("InStore")) {
+    if (std::optional<bool> V = InStore->getAsBoolean())
+      R.InStore = *V;
+    else
+      return false;
+  }
+  if (const Value *AcceptsStringLike = O->get("AcceptsStringLike")) {
+    if (std::optional<bool> V = AcceptsStringLike->getAsBoolean())
+      R.AcceptsStringLike = *V;
+    else
+      return false;
+  }
+  return true;
 }
 
 Value nixd::toJSON(const OptionType::KnownSubOption &Params) {

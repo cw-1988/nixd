@@ -21,6 +21,42 @@ std::string_view trimOuterParens(std::string_view S) {
 
 bool isStorePath(std::string_view S) { return S.starts_with("/nix/store/"); }
 
+std::optional<bool> isAbsolutePathValue(const Expr &Value,
+                                        OptionLiteralKind Actual) {
+  if (Actual == OptionLiteralKind::Path)
+    return true;
+  if (Actual != OptionLiteralKind::String)
+    return std::nullopt;
+
+  std::optional<std::string> Text = literalString(Value);
+  if (!Text)
+    return std::nullopt;
+  return Text->starts_with("/");
+}
+
+std::optional<bool> isStorePathValue(const Expr &Value,
+                                     OptionLiteralKind Actual) {
+  if (Actual == OptionLiteralKind::String) {
+    std::optional<std::string> Text = literalString(Value);
+    if (!Text)
+      return std::nullopt;
+    return isStorePath(*Text);
+  }
+
+  if (Actual != OptionLiteralKind::Path)
+    return std::nullopt;
+
+  std::optional<std::string> Text = pathLiteralText(Value);
+  if (!Text)
+    return std::nullopt;
+
+  // Relative path literals evaluate to absolute source paths, not store paths.
+  // Search paths depend on the evaluator's lookup path, so leave them unknown.
+  if (Text->starts_with("<"))
+    return std::nullopt;
+  return isStorePath(*Text);
+}
+
 std::optional<OptionType::PathConstraint>
 pathConstraintFor(const OptionType &Type) {
   if (Type.Path)
@@ -56,22 +92,33 @@ SchemaMatch pathConstraintMatch(const OptionType &Type, const Expr &Value,
   if (!Constraint)
     return SchemaMatch::Unknown;
 
-  std::optional<std::string> Text;
-  if (Actual == OptionLiteralKind::Path)
-    Text = pathLiteralText(Value);
-  else if (Actual == OptionLiteralKind::String && Constraint->AcceptsStringLike)
-    Text = literalString(Value);
-  else if (Actual == OptionLiteralKind::Unknown)
+  if (Actual == OptionLiteralKind::Unknown)
     return SchemaMatch::Unknown;
-  else
+
+  const bool AcceptsPathLiteral =
+      Actual == OptionLiteralKind::Path &&
+      (!Constraint->InStore || *Constraint->InStore);
+  const bool AcceptsString =
+      Actual == OptionLiteralKind::String && Constraint->AcceptsStringLike;
+  if (!AcceptsPathLiteral && !AcceptsString)
     return SchemaMatch::Mismatches;
 
-  if (!Text)
-    return SchemaMatch::Unknown;
-  if (Constraint->Absolute && !Text->starts_with("/"))
-    return SchemaMatch::Mismatches;
-  if (Constraint->InStore && !isStorePath(*Text))
-    return SchemaMatch::Mismatches;
+  if (Constraint->Absolute) {
+    std::optional<bool> ActualAbsolute = isAbsolutePathValue(Value, Actual);
+    if (!ActualAbsolute)
+      return SchemaMatch::Unknown;
+    if (*ActualAbsolute != *Constraint->Absolute)
+      return SchemaMatch::Mismatches;
+  }
+
+  if (Constraint->InStore) {
+    std::optional<bool> ActualInStore = isStorePathValue(Value, Actual);
+    if (!ActualInStore)
+      return SchemaMatch::Unknown;
+    if (*ActualInStore != *Constraint->InStore)
+      return SchemaMatch::Mismatches;
+  }
+
   return SchemaMatch::Matches;
 }
 

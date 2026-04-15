@@ -34,10 +34,11 @@ CHECK:        "PasswdEntry": true,
 ```
 
 ```
+CHECK:      "Description": "absolute path",
 CHECK:      "Name": "path",
 CHECK:      "PathConstraint": {
 CHECK:        "Absolute": true,
-CHECK:        "AcceptsStringLike": true,
+CHECK:        "AcceptsStringLike": true
 ```
 
 ```json
@@ -50,6 +51,7 @@ CHECK:        "AcceptsStringLike": true,
 ```
 
 ```
+CHECK:      "Description": "path in the Nix store",
 CHECK:      "Name": "path",
 CHECK:      "PathConstraint": {
 CHECK:        "Absolute": true,

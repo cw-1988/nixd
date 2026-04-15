@@ -24,8 +24,9 @@ PathInfo pathInfoFor(const OptionType &Type) {
   PathInfo Info;
   if (Type.Path) {
     Info.Accepts = true;
-    Info.Absolute = Type.Path->Absolute || Type.Path->InStore;
-    Info.InStore = Type.Path->InStore;
+    Info.Absolute = Type.Path->Absolute.value_or(false) ||
+                    Type.Path->InStore.value_or(false);
+    Info.InStore = Type.Path->InStore.value_or(false);
     return Info;
   }
   if (LowerName == "path" || LowerName == "pathinstore" ||

@@ -311,15 +311,14 @@ void fillPathConstraint(nix::EvalState &State, nix::Value *Payload,
     if (std::optional<bool> Absolute = getBool(State, *Payload, "absolute")) {
       Constraint.Absolute = *Absolute;
       HasConstraint = true;
-      if (*Absolute)
-        SawStringLikePathPayload = true;
+      SawStringLikePathPayload = true;
     }
     if (std::optional<bool> InStore = getBool(State, *Payload, "inStore")) {
       Constraint.InStore = *InStore;
       if (*InStore) {
         Constraint.Absolute = true;
-        SawStringLikePathPayload = true;
       }
+      SawStringLikePathPayload = true;
       HasConstraint = true;
     }
     if (std::optional<bool> AcceptsString =

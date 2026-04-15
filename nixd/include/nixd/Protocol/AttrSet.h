@@ -139,8 +139,8 @@ struct OptionType {
   };
 
   struct PathConstraint {
-    bool Absolute = false;
-    bool InStore = false;
+    std::optional<bool> Absolute;
+    std::optional<bool> InStore;
     bool AcceptsStringLike = false;
   };
 
