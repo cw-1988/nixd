@@ -2,6 +2,9 @@
 
 /html/
 
+.local/
+.clangd
+
 __pycache__
 
 result
