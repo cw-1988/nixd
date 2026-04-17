@@ -10,13 +10,19 @@
 #include "Option/FlakeSchema.h"
 #include "Option/Navigation.h"
 #include "nixd/Controller/Controller.h"
+#include "nixd/Controller/FlakeInputInspect.h"
+#include "nixd/Controller/Option.h"
 #include "nixd/Protocol/AttrSet.h"
+
+#include <nixf/Basic/Nodes/Lambda.h>
+#include <nixf/Basic/Nodes/Simple.h>
 
 #include <boost/asio/post.hpp>
 
 #include <llvm/Support/Error.h>
 
 #include <algorithm>
+#include <functional>
 #include <optional>
 #include <semaphore>
 #include <set>
@@ -64,10 +70,6 @@ std::string renderOptionTypeInline(const OptionType &Type) {
     OS << *Type.Description;
   }
   return OS.str();
-}
-
-bool shouldHideSubOption(std::string_view Name) {
-  return Name.starts_with("_");
 }
 
 std::string mkOptionMarkdown(const OptionDescription &Desc);
@@ -245,127 +247,10 @@ std::optional<Hover> hoverOptionValueField(
   return std::nullopt;
 }
 
-void appendSubOptionList(std::ostringstream &OS, const OptionType &Type,
-                         std::string_view Heading) {
-  bool WroteHeading = false;
-  for (const auto &[Name, Summary] : Type.KnownSubOptions) {
-    if (shouldHideSubOption(Name))
-      continue;
-
-    if (!WroteHeading) {
-      OS << "\n\n## " << Heading << "\n\n";
-      WroteHeading = true;
-    }
-
-    OS << "- `" << Name << "`";
-    if (auto It = Type.NestedTypes.find(Name); It != Type.NestedTypes.end()) {
-      const std::string Rendered = renderOptionTypeInline(It->second);
-      if (!Rendered.empty())
-        OS << ": " << Rendered;
-    }
-
-    std::vector<std::string_view> Flags;
-    if (Summary.Required)
-      Flags.emplace_back("required");
-    if (Summary.HasDefault)
-      Flags.emplace_back("default");
-    if (Summary.HasEmptyValue)
-      Flags.emplace_back("empty value");
-    if (!Flags.empty()) {
-      OS << " (";
-      for (size_t I = 0; I < Flags.size(); ++I) {
-        if (I)
-          OS << ", ";
-        OS << Flags[I];
-      }
-      OS << ")";
-    }
-    OS << "\n";
-  }
-
-  if (!Type.KnownSubOptionsComplete) {
-    if (!WroteHeading) {
-      OS << "\n\n## " << Heading << "\n\n";
-      WroteHeading = true;
-    }
-    OS << "- ...\n";
-  }
-}
-
-void appendNestedSubOptions(std::ostringstream &OS, const OptionType &Type,
-                            std::string_view Heading, unsigned Depth,
-                            std::set<std::string> &Seen) {
-  if (Depth > 4)
-    return;
-
-  const std::string Fingerprint = std::string(Heading) + "\n" +
-                                  Type.Name.value_or("") + "\n" +
-                                  Type.Description.value_or("");
-  std::string RichFingerprint = Fingerprint;
-  for (const auto &[Name, Summary] : Type.KnownSubOptions) {
-    (void)Summary;
-    RichFingerprint += "\nsub:" + Name;
-  }
-  for (const auto &[Name, Child] : Type.NestedTypes) {
-    (void)Child;
-    RichFingerprint += "\ntype:" + Name;
-  }
-  if (!Seen.insert(RichFingerprint).second)
-    return;
-
-  if (!Type.KnownSubOptions.empty() || !Type.KnownSubOptionsComplete)
-    appendSubOptionList(OS, Type, Heading);
-
-  const std::string LowerName = option_navigation::lowerTypeName(Type);
-
-  if (LowerName == "nullor" || LowerName == "unique") {
-    std::optional<OptionType> Elem =
-        LowerName == "nullor" ? option_navigation::nullOrTypeFor(Type)
-                              : option_navigation::elemTypeFor(Type, LowerName);
-    if (Elem)
-      appendNestedSubOptions(OS, *Elem, Heading, Depth + 1, Seen);
-    return;
-  }
-
-  if (LowerName == "listof" || option_navigation::isNonEmptyListType(Type)) {
-    if (std::optional<OptionType> Elem =
-            option_navigation::elemTypeFor(Type, LowerName))
-      appendNestedSubOptions(OS, *Elem, "Element Options", Depth + 1, Seen);
-    return;
-  }
-
-  if (LowerName == "loaof") {
-    if (std::optional<OptionType> Elem =
-            option_navigation::elemTypeFor(Type, LowerName))
-      appendNestedSubOptions(OS, *Elem, "Element Options", Depth + 1, Seen);
-    return;
-  }
-
-  if (LowerName == "functionto") {
-    if (std::optional<OptionType> Result =
-            option_navigation::functionResultTypeFor(Type))
-      appendNestedSubOptions(OS, *Result, "Result Options", Depth + 1, Seen);
-    return;
-  }
-
-  if (LowerName == "attrsof" || LowerName == "lazyattrsof" ||
-      LowerName == "attrswith") {
-    if (std::optional<OptionType> Elem =
-            option_navigation::elemTypeFor(Type, LowerName))
-      appendNestedSubOptions(OS, *Elem, "Attribute Options", Depth + 1, Seen);
-    return;
-  }
-
-  for (const OptionType &Alternative :
-       option_navigation::alternativeTypesFor(Type, LowerName))
-    appendNestedSubOptions(OS, Alternative, "Alternative Options", Depth + 1,
-                           Seen);
-}
-
 std::string mkOptionMarkdown(const OptionDescription &Desc) {
   std::ostringstream OS;
 
-  OS << "## Type\n\n";
+  OS << "\"type\": ";
   if (Desc.Type) {
     const std::string Rendered = renderOptionTypeInline(*Desc.Type);
     OS << (Rendered.empty() ? "? (missing type)" : Rendered);
@@ -374,14 +259,481 @@ std::string mkOptionMarkdown(const OptionDescription &Desc) {
   }
 
   if (Desc.Description)
-    OS << "\n\n## Description\n\n" << *Desc.Description;
+    OS << "  \n\"description\": " << *Desc.Description;
 
-  if (Desc.Type) {
-    std::set<std::string> Seen;
-    appendNestedSubOptions(OS, *Desc.Type, "Options", 0, Seen);
+  return OS.str();
+}
+
+bool hasHoverOptionTypeMetadata(const OptionType &Type) {
+  return Type.Name || Type.Description || !Type.NestedTypes.empty() ||
+         !Type.EnumValues.empty() || Type.String || Type.Path ||
+         !Type.KnownSubOptions.empty() || !Type.KnownSubOptionsComplete;
+}
+
+void normalizeNamespaceTypeLabels(OptionType &Type) {
+  for (auto &[Name, Child] : Type.NestedTypes) {
+    (void)Name;
+    normalizeNamespaceTypeLabels(Child);
+  }
+
+  if (!Type.Name && !Type.Description &&
+      (option_navigation::hasSubOptionMetadata(Type) ||
+       !Type.NestedTypes.empty()))
+    Type.Name = "namespace";
+}
+
+OptionDescription normalizeHoverOptionDescription(OptionDescription Desc) {
+  if (Desc.Type)
+    normalizeNamespaceTypeLabels(*Desc.Type);
+  return Desc;
+}
+
+bool hasHoverOptionDescription(const OptionDescription &Desc) {
+  return Desc.Description || Desc.Example || !Desc.Declarations.empty() ||
+         !Desc.Definitions.empty() ||
+         (Desc.Type && hasHoverOptionTypeMetadata(*Desc.Type));
+}
+
+std::optional<OptionDescription>
+synthesizeNamespaceDescription(const std::vector<ResolvedOptionField> &Fields) {
+  if (Fields.empty())
+    return std::nullopt;
+
+  OptionType Type;
+  Type.Name = "namespace";
+  for (const ResolvedOptionField &Entry : Fields) {
+    Type.KnownSubOptions.try_emplace(Entry.Field.Name);
+    if (!Entry.Field.Description)
+      continue;
+
+    OptionType Child;
+    bool HasChild = false;
+    if (Entry.Field.Description->Type) {
+      Child = *Entry.Field.Description->Type;
+      HasChild = true;
+    }
+    if (!Child.Description && Entry.Field.Description->Description) {
+      Child.Description = *Entry.Field.Description->Description;
+      HasChild = true;
+    }
+    if (!HasChild)
+      continue;
+
+    normalizeNamespaceTypeLabels(Child);
+    if (hasHoverOptionTypeMetadata(Child))
+      Type.NestedTypes[Entry.Field.Name] = std::move(Child);
+  }
+
+  OptionDescription Desc;
+  Desc.Type = std::move(Type);
+  return Desc;
+}
+
+std::optional<OptionDescription> resolveHoverOptionDescription(
+    const std::vector<std::string> &Scope,
+    const std::function<std::vector<ResolvedOptionInfo>(
+        const std::vector<std::string> &)> &Resolve,
+    const std::function<std::vector<ResolvedOptionInfo>(
+        const std::vector<std::string> &)> &ResolveDerived,
+    const std::function<std::vector<ResolvedOptionField>(
+        const std::vector<std::string> &, const std::string &)>
+        &CompleteDerived) {
+  std::optional<OptionDescription> Fallback;
+  for (const ResolvedOptionInfo &Info : ResolveDerived(Scope)) {
+    OptionDescription Desc = normalizeHoverOptionDescription(Info.Description);
+    if (hasHoverOptionDescription(Desc))
+      return Desc;
+    if (!Fallback)
+      Fallback = std::move(Desc);
+  }
+
+  for (size_t PrefixLen = Scope.size(); PrefixLen > 0; --PrefixLen) {
+    std::vector<std::string> ParentScope(Scope.begin(),
+                                         Scope.begin() + PrefixLen);
+    std::vector<std::string> Suffix(Scope.begin() + PrefixLen, Scope.end());
+    if (Suffix.empty())
+      continue;
+
+    for (const ResolvedOptionInfo &Info : Resolve(ParentScope)) {
+      std::optional<OptionType> Derived =
+          option_navigation::deriveTypeFromResolvedInfo(Info, Suffix);
+      if (!Derived)
+        continue;
+
+      OptionDescription Desc;
+      Desc.Type = std::move(*Derived);
+      Desc = normalizeHoverOptionDescription(std::move(Desc));
+      if (hasHoverOptionDescription(Desc))
+        return Desc;
+      if (!Fallback)
+        Fallback = std::move(Desc);
+    }
+  }
+
+  if (std::optional<OptionDescription> Namespace =
+          synthesizeNamespaceDescription(CompleteDerived(Scope, ""))) {
+    *Namespace = normalizeHoverOptionDescription(std::move(*Namespace));
+    if (hasHoverOptionDescription(*Namespace))
+      return Namespace;
+    if (!Fallback)
+      Fallback = std::move(*Namespace);
+  }
+
+  return Fallback;
+}
+
+struct ModuleInputContext {
+  enum class Kind {
+    Named,
+    Ellipsis,
+  };
+
+  Kind InputKind = Kind::Named;
+  std::string Name;
+  const ExprLambda *Lambda = nullptr;
+  const Node *RangeNode = nullptr;
+};
+
+std::optional<ModuleInputContext>
+moduleInputFromDefinitionSyntax(const Node &Syntax,
+                                const ParentMapAnalysis &PM) {
+  if (const Node *FormalNode = PM.upTo(Syntax, Node::NK_Formal)) {
+    const auto &Formal = static_cast<const nixf::Formal &>(*FormalNode);
+    const Node *LambdaNode = PM.upTo(*FormalNode, Node::NK_ExprLambda);
+    if (!LambdaNode)
+      return std::nullopt;
+
+    const auto &Lambda = static_cast<const ExprLambda &>(*LambdaNode);
+    if (Formal.isEllipsis()) {
+      if (&Formal.ellipsis() != &Syntax && FormalNode != &Syntax)
+        return std::nullopt;
+      return ModuleInputContext{
+          .InputKind = ModuleInputContext::Kind::Ellipsis,
+          .Lambda = &Lambda,
+          .RangeNode = &Syntax,
+      };
+    }
+
+    const auto *ID = Formal.id();
+    if (!ID || ID != &Syntax)
+      return std::nullopt;
+    return ModuleInputContext{
+        .InputKind = ModuleInputContext::Kind::Named,
+        .Name = ID->name(),
+        .Lambda = &Lambda,
+        .RangeNode = &Syntax,
+    };
+  }
+
+  if (Syntax.kind() != Node::NK_Identifier)
+    return std::nullopt;
+
+  const Node *ArgNode = PM.upTo(Syntax, Node::NK_LambdaArg);
+  if (!ArgNode)
+    return std::nullopt;
+
+  const auto &Arg = static_cast<const LambdaArg &>(*ArgNode);
+  const auto *ID = Arg.id();
+  if (!ID || ID != &Syntax)
+    return std::nullopt;
+
+  const Node *LambdaNode = PM.upTo(*ArgNode, Node::NK_ExprLambda);
+  if (!LambdaNode)
+    return std::nullopt;
+
+  return ModuleInputContext{
+      .InputKind = ModuleInputContext::Kind::Named,
+      .Name = ID->name(),
+      .Lambda = static_cast<const ExprLambda *>(LambdaNode),
+      .RangeNode = &Syntax,
+  };
+}
+
+std::optional<ModuleInputContext>
+findModuleInputContext(const Node &N, const VariableLookupAnalysis &VLA,
+                       const ParentMapAnalysis &PM) {
+  if (std::optional<ModuleInputContext> Context =
+          moduleInputFromDefinitionSyntax(N, PM))
+    return Context;
+
+  const Node *ExprNode = PM.upExpr(N);
+  if (!ExprNode || ExprNode->kind() != Node::NK_ExprVar)
+    return std::nullopt;
+
+  const auto &Var = static_cast<const ExprVar &>(*ExprNode);
+  const auto Lookup = VLA.query(Var);
+  if (!Lookup.Def || !Lookup.Def->syntax())
+    return std::nullopt;
+
+  std::optional<ModuleInputContext> Context =
+      moduleInputFromDefinitionSyntax(*Lookup.Def->syntax(), PM);
+  if (!Context)
+    return std::nullopt;
+
+  Context->RangeNode = ExprNode;
+  return Context;
+}
+
+bool isTopLevelLambda(const ExprLambda &Lambda, const ParentMapAnalysis &PM) {
+  const Node *Current = &Lambda;
+  while (Current) {
+    if (PM.isRoot(*Current))
+      return true;
+
+    const Node *Parent = PM.query(*Current);
+    if (!Parent)
+      return true;
+
+    if (Parent->kind() != Node::NK_ExprParen)
+      return false;
+    Current = Parent;
+  }
+  return false;
+}
+
+std::optional<OptionType> findSubmoduleType(const OptionType &Type,
+                                            unsigned Depth = 0) {
+  if (Depth > 8)
+    return std::nullopt;
+  if (option_navigation::isSubmoduleLike(Type))
+    return Type;
+
+  const std::string LowerName = option_navigation::lowerTypeName(Type);
+  if (LowerName == "nullor") {
+    if (std::optional<OptionType> Elem =
+            option_navigation::nullOrTypeFor(Type))
+      return findSubmoduleType(*Elem, Depth + 1);
+  }
+  if (LowerName == "unique") {
+    if (std::optional<OptionType> Elem =
+            option_navigation::elemTypeFor(Type, LowerName))
+      return findSubmoduleType(*Elem, Depth + 1);
+  }
+
+  for (const OptionType &Alternative :
+       option_navigation::alternativeTypesFor(Type, LowerName)) {
+    if (std::optional<OptionType> Found =
+            findSubmoduleType(Alternative, Depth + 1))
+      return Found;
+  }
+
+  return std::nullopt;
+}
+
+option_navigation::ChildStep
+toNavigationStep(const OptionValueChildStep &Step) {
+  switch (Step.Kind) {
+  case OptionValueChildKind::ListElement:
+    return option_navigation::ChildStep{
+        .Kind = option_navigation::ChildKind::ListElement};
+  case OptionValueChildKind::AttrValue:
+    return option_navigation::ChildStep{
+        .Kind = option_navigation::ChildKind::AttrValue, .Name = Step.Name};
+  case OptionValueChildKind::FunctionBody:
+    return option_navigation::ChildStep{
+        .Kind = option_navigation::ChildKind::FunctionBody};
+  }
+  __builtin_unreachable();
+}
+
+std::vector<option_navigation::ChildStep>
+toNavigationPath(const std::vector<OptionValueChildStep> &Steps) {
+  std::vector<option_navigation::ChildStep> Result;
+  Result.reserve(Steps.size());
+  for (const OptionValueChildStep &Step : Steps)
+    Result.emplace_back(toNavigationStep(Step));
+  return Result;
+}
+
+std::optional<OptionType> resolveSubmoduleTypeForLambda(
+    const ExprLambda &Lambda, const ParentMapAnalysis &PM,
+    const std::function<std::vector<ResolvedOptionInfo>(
+        const std::vector<std::string> &)> &Resolve) {
+  std::optional<OptionValueContext> Context =
+      findOptionValueContext(Lambda, PM, Lambda.lCur().position());
+  if (!Context)
+    return std::nullopt;
+
+  std::vector<option_navigation::ChildStep> ValuePath =
+      toNavigationPath(Context->ValuePath);
+  for (const ResolvedOptionInfo &Info : Resolve(Context->Scope)) {
+    if (!Info.Description.Type)
+      continue;
+
+    std::vector<OptionType> Types =
+        option_navigation::descendValuePath(*Info.Description.Type, ValuePath);
+    for (const OptionType &Type : Types) {
+      if (std::optional<OptionType> Submodule = findSubmoduleType(Type))
+        return Submodule;
+    }
+  }
+
+  return std::nullopt;
+}
+
+struct ModuleInputs {
+  std::set<std::string> Core;
+  std::set<std::string> ModuleArgs;
+  std::set<std::string> SpecialArgs;
+};
+
+std::vector<std::string> appendScope(std::vector<std::string> Scope,
+                                     std::initializer_list<std::string> Suffix) {
+  Scope.insert(Scope.end(), Suffix.begin(), Suffix.end());
+  return Scope;
+}
+
+std::set<std::string> valueAttrNameSet(
+    const std::vector<ResolvedOptionInfo> &Infos) {
+  std::set<std::string> Names;
+  for (const ResolvedOptionInfo &Info : Infos)
+    Names.insert(Info.Description.ValueAttrNames.begin(),
+                 Info.Description.ValueAttrNames.end());
+  return Names;
+}
+
+std::optional<std::vector<std::string>>
+moduleInputScopeForLambda(const ExprLambda &Lambda,
+                          const ParentMapAnalysis &PM) {
+  if (std::optional<OptionValueContext> Context =
+          findOptionValueContext(Lambda, PM, Lambda.lCur().position()))
+    return std::move(Context->Scope);
+  if (isTopLevelLambda(Lambda, PM))
+    return std::vector<std::string>{};
+  return std::nullopt;
+}
+
+ModuleInputs resolveModuleInputs(
+    const std::vector<std::string> &Scope,
+    const std::function<std::vector<ResolvedOptionInfo>(
+        const std::vector<std::string> &)> &Resolve) {
+  ModuleInputs Inputs;
+  Inputs.Core = {"config", "lib", "options", "specialArgs"};
+  Inputs.ModuleArgs =
+      valueAttrNameSet(Resolve(appendScope(Scope, {"_module", "args"})));
+  Inputs.SpecialArgs =
+      valueAttrNameSet(Resolve(appendScope(Scope, {"_module", "specialArgs"})));
+  return Inputs;
+}
+
+std::set<std::string> allModuleInputNames(const ModuleInputs &Inputs) {
+  std::set<std::string> Names = Inputs.Core;
+  Names.insert(Inputs.ModuleArgs.begin(), Inputs.ModuleArgs.end());
+  Names.insert(Inputs.SpecialArgs.begin(), Inputs.SpecialArgs.end());
+  return Names;
+}
+
+std::vector<std::string> moduleInputSources(std::string_view Name,
+                                            const ModuleInputs &Inputs) {
+  std::vector<std::string> Sources;
+  if (Inputs.Core.contains(std::string(Name)))
+    Sources.emplace_back("module system");
+  if (Inputs.ModuleArgs.contains(std::string(Name)))
+    Sources.emplace_back("_module.args");
+  if (Inputs.SpecialArgs.contains(std::string(Name)))
+    Sources.emplace_back("specialArgs");
+  return Sources;
+}
+
+std::string joinSources(const std::vector<std::string> &Sources) {
+  std::ostringstream OS;
+  for (size_t I = 0; I < Sources.size(); ++I) {
+    if (I)
+      OS << ", ";
+    OS << "`" << Sources[I] << "`";
+  }
+  return OS.str();
+}
+
+void appendModuleInputList(std::ostringstream &OS, const ModuleInputs &Inputs) {
+  for (const std::string &Name : allModuleInputNames(Inputs)) {
+    std::vector<std::string> Sources = moduleInputSources(Name, Inputs);
+    OS << "- `" << Name << "`";
+    if (!Sources.empty())
+      OS << " (" << joinSources(Sources) << ")";
+    OS << "\n";
+  }
+}
+
+std::string mkModuleInputMarkdown(std::string_view Name,
+                                  const ModuleInputs &Inputs,
+                                  const OptionType *SubmoduleType) {
+  std::ostringstream OS;
+  OS << "## Module Input\n\n";
+  OS << "`" << Name << "`\n\n";
+  std::vector<std::string> Sources = moduleInputSources(Name, Inputs);
+  OS << "Provided by: "
+     << (Sources.empty() ? "unknown module argument source"
+                         : joinSources(Sources))
+     << ".";
+
+  if (SubmoduleType && (Name == "config" || Name == "options")) {
+    OptionDescription Desc;
+    Desc.Type = *SubmoduleType;
+    OS << "\n\n" << mkOptionMarkdown(Desc);
   }
 
   return OS.str();
+}
+
+std::string mkModuleEllipsisMarkdown(const ModuleInputs &Inputs,
+                                     const OptionType *SubmoduleType) {
+  std::ostringstream OS;
+  OS << "## Additional Module Inputs\n\n";
+  OS << "`...` keeps this lambda open to module arguments that are not listed "
+        "explicitly.";
+  OS << "\n\n## Provided Inputs\n\n";
+  appendModuleInputList(OS, Inputs);
+
+  if (SubmoduleType) {
+    OptionDescription Desc;
+    Desc.Type = *SubmoduleType;
+    OS << "\n`config` and `options` are scoped to this submodule.\n\n"
+       << mkOptionMarkdown(Desc);
+  }
+
+  return OS.str();
+}
+
+std::optional<Hover> hoverModuleInput(
+    const ModuleInputContext &Context, llvm::StringRef Src,
+    const ParentMapAnalysis &PM,
+    const std::function<std::vector<ResolvedOptionInfo>(
+        const std::vector<std::string> &)> &Resolve) {
+  if (!Context.Lambda || !Context.RangeNode)
+    return std::nullopt;
+
+  std::optional<std::vector<std::string>> Scope =
+      moduleInputScopeForLambda(*Context.Lambda, PM);
+  if (!Scope)
+    return std::nullopt;
+
+  ModuleInputs Inputs = resolveModuleInputs(*Scope, Resolve);
+  std::optional<OptionType> SubmoduleType =
+      resolveSubmoduleTypeForLambda(*Context.Lambda, PM, Resolve);
+  const bool IsTopLevel = isTopLevelLambda(*Context.Lambda, PM);
+  if (!SubmoduleType && !IsTopLevel)
+    return std::nullopt;
+
+  std::string Docs;
+  if (Context.InputKind == ModuleInputContext::Kind::Ellipsis) {
+    Docs = mkModuleEllipsisMarkdown(Inputs,
+                                    SubmoduleType ? &*SubmoduleType : nullptr);
+  } else {
+    if (!allModuleInputNames(Inputs).contains(Context.Name))
+      return std::nullopt;
+    Docs = mkModuleInputMarkdown(Context.Name, Inputs,
+                                 SubmoduleType ? &*SubmoduleType : nullptr);
+  }
+
+  return Hover{
+      .contents =
+          MarkupContent{
+              .kind = MarkupKind::Markdown,
+              .value = std::move(Docs),
+          },
+      .range = toLSPRange(Src, Context.RangeNode->range()),
+  };
 }
 
 /// \brief Provide package information, library information ... , from nixpkgs.
@@ -548,9 +900,48 @@ void Controller::onHover(const TextDocumentPositionParams &Params,
       const auto Pos = nixf::Position{RawPos.line, RawPos.character};
       const auto &N = *CheckDefault(AST->descend({Pos, Pos}));
 
-      const auto Name = std::string(N.name());
       const auto &VLA = *TU->variableLookup();
       const auto &PM = *TU->parentMap();
+
+      if (std::optional<FlakeOutputInputContext> Context =
+              findFlakeOutputInputContext(N, VLA, PM, File)) {
+        std::string Docs;
+        if (Context->InputKind == FlakeOutputInputContext::Kind::Ellipsis) {
+          Docs = renderFlakeOutputEllipsisMarkdown(Context->Inputs);
+        } else {
+          auto It = std::find_if(
+              Context->Inputs.begin(), Context->Inputs.end(),
+              [&](const FlakeOutputInput &Input) {
+                return Input.Name == Context->Name;
+              });
+          if (It != Context->Inputs.end())
+            Docs = renderFlakeOutputInputMarkdown(Context->Name, *It);
+        }
+        if (!Docs.empty()) {
+          return Hover{
+              .contents =
+                  MarkupContent{
+                      .kind = MarkupKind::Markdown,
+                      .value = std::move(Docs),
+                  },
+              .range = toLSPRange(TU->src(), Context->RangeNode->range()),
+          };
+        }
+      }
+
+      if (std::optional<ModuleInputContext> Context =
+              findModuleInputContext(N, VLA, PM)) {
+        auto Resolve = [&](const std::vector<std::string> &Scope) {
+          std::vector<std::string> AdjustedScope = Scope;
+          if (flake_schema::isFlakeFile(File) && Context->Lambda &&
+              flake_schema::isInsideOutputsBody(*Context->Lambda, PM))
+            AdjustedScope = flake_schema::outputsBodyScope(AdjustedScope);
+          return resolveOptionInfosForFile(File, AdjustedScope);
+        };
+        if (std::optional<Hover> H =
+                hoverModuleInput(*Context, TU->src(), PM, Resolve))
+          return *H;
+      }
 
       const auto &UpExpr = *CheckDefault(PM.upExpr(N));
 
@@ -561,10 +952,20 @@ void Controller::onHover(const TextDocumentPositionParams &Params,
           if (flake_schema::isFlakeFile(File) &&
               flake_schema::isInsideOutputsBody(N, PM))
             Scope = flake_schema::outputsBodyScope(Scope);
-          for (const ResolvedOptionInfo &Info :
-               resolveDerivedOptionInfosForFile(File, Scope)) {
-            const OptionDescription &Desc = Info.Description;
-            std::string Docs = mkOptionMarkdown(Desc);
+          auto Resolve = [&](const std::vector<std::string> &Path) {
+            return resolveOptionInfosForFile(File, Path);
+          };
+          auto ResolveDerived = [&](const std::vector<std::string> &Path) {
+            return resolveDerivedOptionInfosForFile(File, Path);
+          };
+          auto CompleteDerived = [&](const std::vector<std::string> &Path,
+                                     const std::string &Prefix) {
+            return completeDerivedOptionsForFile(File, Path, Prefix);
+          };
+          if (std::optional<OptionDescription> Desc =
+                  resolveHoverOptionDescription(Scope, Resolve, ResolveDerived,
+                                               CompleteDerived)) {
+            std::string Docs = mkOptionMarkdown(*Desc);
             return Hover{
                 .contents =
                     MarkupContent{
