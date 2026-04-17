@@ -53,7 +53,7 @@ CHECK-NEXT:  "jsonrpc": "2.0",
 CHECK-NEXT:  "result": {
 CHECK-NEXT:    "contents": {
 CHECK-NEXT:      "kind": "markdown",
-CHECK-NEXT:      "value": "## Type\n\nhello type\n\n## Description\n\ntest"
+CHECK-NEXT:      "value": "\"type\": hello type  \n\"description\": test"
 CHECK-NEXT:    },
 CHECK-NEXT:    "range": {
 CHECK-NEXT:      "end": {
