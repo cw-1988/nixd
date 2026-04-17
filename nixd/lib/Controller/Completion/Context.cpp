@@ -34,8 +34,10 @@ const nixf::Node *nixd::completion::findCompletionNode(const nixf::Node &AST,
     if (isWhitespace(Src[Prev]))
       continue;
     const lspserver::Position PrevPos = lspserver::offsetToPosition(Src, Prev);
-    return AST.descend({nixf::Position(PrevPos.line, PrevPos.character),
-                        nixf::Position(PrevPos.line, PrevPos.character)});
+    if (const nixf::Node *Desc =
+            AST.descend({nixf::Position(PrevPos.line, PrevPos.character),
+                         Pos}))
+      return Desc;
   }
   return nullptr;
 }

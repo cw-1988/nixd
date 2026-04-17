@@ -13,6 +13,7 @@
 #include "Option/FlakeSchema.h"
 
 #include "lspserver/Protocol.h"
+#include "lspserver/SourceCode.h"
 
 #include "nixd/Controller/Controller.h"
 #include "nixd/Controller/Option.h"
@@ -23,6 +24,7 @@
 #include <boost/asio/post.hpp>
 
 #include <optional>
+#include <set>
 #include <utility>
 
 using namespace nixd;
@@ -30,6 +32,118 @@ using namespace lspserver;
 using namespace nixf;
 
 using completion::ExceedSizeError;
+
+namespace {
+
+bool isWhitespace(char C) {
+  return C == ' ' || C == '\t' || C == '\n' || C == '\r';
+}
+
+std::set<std::string> usedOptionNames(const ExprAttrs &Attrs) {
+  std::set<std::string> Used;
+  const Binds *Body = Attrs.binds();
+  if (!Body)
+    return Used;
+
+  for (const std::shared_ptr<Node> &Entry : Body->bindings()) {
+    if (!Entry)
+      continue;
+
+    if (Entry->kind() == Node::NK_Binding) {
+      const auto &Binding = static_cast<const nixf::Binding &>(*Entry);
+      const auto &Names = Binding.path().names();
+      if (!Names.empty() && Names.front() && Names.front()->isStatic())
+        Used.insert(Names.front()->staticName());
+      continue;
+    }
+
+    if (Entry->kind() == Node::NK_Inherit) {
+      const auto &Inherit = static_cast<const nixf::Inherit &>(*Entry);
+      for (const std::shared_ptr<AttrName> &Name : Inherit.names()) {
+        if (Name && Name->isStatic())
+          Used.insert(Name->staticName());
+      }
+    }
+  }
+
+  return Used;
+}
+
+std::vector<ResolvedOptionField>
+filterUsedOptionNames(std::vector<ResolvedOptionField> Fields,
+                      const std::set<std::string> &Used) {
+  if (Used.empty())
+    return Fields;
+
+  std::erase_if(Fields, [&](const ResolvedOptionField &Resolved) {
+    return Used.contains(Resolved.Field.Name);
+  });
+  return Fields;
+}
+
+struct EnclosingOptionAttrSet {
+  const ExprAttrs *Attrs = nullptr;
+  std::vector<std::string> Scope;
+};
+
+std::optional<EnclosingOptionAttrSet>
+attrSetFromNode(const Node *Current, const ParentMapAnalysis &PM) {
+  while (Current) {
+    if (Current->kind() == Node::NK_ExprAttrs) {
+      const Node *Parent = PM.query(*Current);
+      if (Parent && Parent->kind() == Node::NK_Binding) {
+        const auto &AttrBinding = static_cast<const nixf::Binding &>(*Parent);
+        if (AttrBinding.value().get() == Current)
+          if (std::optional<std::vector<std::string>> Scope =
+                  findOptionBindingScope(AttrBinding, PM))
+            return EnclosingOptionAttrSet{
+                .Attrs = &static_cast<const ExprAttrs &>(*Current),
+                .Scope = std::move(*Scope),
+            };
+      }
+    }
+
+    if (PM.isRoot(*Current))
+      break;
+    Current = PM.query(*Current);
+  }
+  return std::nullopt;
+}
+
+std::optional<EnclosingOptionAttrSet>
+enclosingOptionAttrSetScope(const Node &AST, std::string_view Src,
+                            nixf::Position Pos, const ParentMapAnalysis &PM) {
+  if (const Node *Desc = AST.descend({Pos, Pos}))
+    if (std::optional<EnclosingOptionAttrSet> Context =
+            attrSetFromNode(Desc, PM))
+      return Context;
+
+  lspserver::Position LSPPos{.line = Pos.line(), .character = Pos.column()};
+  llvm::Expected<size_t> Offset =
+      lspserver::positionToOffset(Src, LSPPos, true);
+  if (!Offset) {
+    llvm::consumeError(Offset.takeError());
+    return std::nullopt;
+  }
+
+  for (size_t I = *Offset; I > 0; --I) {
+    const size_t Prev = I - 1;
+    if (isWhitespace(Src[Prev]))
+      continue;
+    const lspserver::Position PrevPos = lspserver::offsetToPosition(Src, Prev);
+    if (const Node *Desc =
+            AST.descend({nixf::Position(PrevPos.line, PrevPos.character),
+                         Pos})) {
+      if (std::optional<EnclosingOptionAttrSet> Context =
+              attrSetFromNode(Desc, PM))
+        return Context;
+    }
+  }
+
+  return std::nullopt;
+}
+
+} // namespace
 
 void Controller::onCompletion(const CompletionParams &Params,
                               Callback<CompletionList> Reply) {
@@ -52,11 +166,13 @@ void Controller::onCompletion(const CompletionParams &Params,
         CompletionList List;
         const VariableLookupAnalysis &VLA = *TU->variableLookup();
         try {
-          const auto &UpExpr = *CheckDefault(PM.upExpr(N));
           const bool InFlakeOutputsBody =
               UsesFlakeSchema && flake_schema::isInsideOutputsBody(N, PM);
+          const Node *UpExpr = PM.upExpr(N);
+          const std::optional<EnclosingOptionAttrSet> CurrentAttrSet =
+              attrSetFromNode(&N, PM);
 
-          if (UpExpr.kind() == Node::NK_ExprAttrs) {
+          if (UpExpr && UpExpr->kind() == Node::NK_ExprAttrs) {
             if (std::optional<AttrPathCompleteParams> Params =
                     completion::optionAttrPathCompletionParams(N, PM)) {
               std::vector<std::string> Scope =
@@ -65,11 +181,30 @@ void Controller::onCompletion(const CompletionParams &Params,
                       : Params->Scope;
               if (UsesFlakeSchema || waitForOptionProvidersReadyForTests())
                 completion::completeOptionNames(
-                    completeDerivedOptionsForFile(File, Scope, Params->Prefix),
+                    filterUsedOptionNames(
+                        completeDerivedOptionsForFile(File, Scope,
+                                                      Params->Prefix),
+                        CurrentAttrSet ? usedOptionNames(*CurrentAttrSet->Attrs)
+                                       : std::set<std::string>{}),
                     ClientCaps.CompletionSnippets, List.items);
               if (!List.items.empty())
                 return List;
             }
+          }
+
+          if (std::optional<EnclosingOptionAttrSet> Context =
+                  enclosingOptionAttrSetScope(*AST, TU->src(), Pos, PM)) {
+            std::vector<std::string> Scope = Context->Scope;
+            if (InFlakeOutputsBody)
+              Scope = flake_schema::outputsBodyScope(Scope);
+            if (UsesFlakeSchema || waitForOptionProvidersReadyForTests())
+              completion::completeOptionNames(
+                  filterUsedOptionNames(
+                      completeDerivedOptionsForFile(File, Scope, ""),
+                      usedOptionNames(*Context->Attrs)),
+                  ClientCaps.CompletionSnippets, List.items);
+            if (!List.items.empty())
+              return List;
           }
 
           if (std::optional<OptionValueContext> Context =
@@ -88,11 +223,14 @@ void Controller::onCompletion(const CompletionParams &Params,
               return List;
           }
 
-          switch (UpExpr.kind()) {
+          if (!UpExpr)
+            return List;
+
+          switch (UpExpr->kind()) {
           // In these cases, assume the cursor have "variable" scoping.
           case Node::NK_ExprVar: {
             completion::completeVarName(
-                VLA, PM, static_cast<const nixf::ExprVar &>(UpExpr),
+                VLA, PM, static_cast<const nixf::ExprVar &>(*UpExpr),
                 *nixpkgsClient(), List.items);
             return List;
           }
@@ -101,7 +239,8 @@ void Controller::onCompletion(const CompletionParams &Params,
           // foo.|
           // foo.a.bar|
           case Node::NK_ExprSelect: {
-            const auto &Select = static_cast<const nixf::ExprSelect &>(UpExpr);
+            const auto &Select =
+                static_cast<const nixf::ExprSelect &>(*UpExpr);
             completion::completeSelect(Select, *nixpkgsClient(), VLA, PM,
                                        N.kind() == Node::NK_Dot, List.items);
             return List;
