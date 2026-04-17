@@ -183,6 +183,7 @@ struct OptionDescription {
   std::vector<lspserver::Location> Definitions;
   std::optional<std::string> Example;
   std::optional<OptionType> Type;
+  std::vector<std::string> ValueAttrNames;
 };
 
 llvm::json::Value toJSON(const OptionDescription &Params);

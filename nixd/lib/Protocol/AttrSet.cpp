@@ -159,22 +159,26 @@ bool nixd::fromJSON(const Value &Params, OptionType &R, Path P) {
 }
 
 Value nixd::toJSON(const OptionDescription &Params) {
-  return Object{
+  Object Result{
       {"Description", Params.Description},
       {"Declarations", Params.Declarations},
       {"Definitions", Params.Definitions},
       {"Example", Params.Example},
       {"Type", Params.Type},
   };
+  if (!Params.ValueAttrNames.empty())
+    Result.try_emplace("ValueAttrNames", Params.ValueAttrNames);
+  return Result;
 }
 bool nixd::fromJSON(const Value &Params, OptionDescription &R, Path P) {
   ObjectMapper O(Params, P);
-  return O                                                //
-         && O.mapOptional("Description", R.Description)   //
-         && O.mapOptional("Declarations", R.Declarations) //
-         && O.mapOptional("Definitions", R.Definitions)   //
-         && O.mapOptional("Example", R.Example)           //
-         && O.mapOptional("Type", R.Type)                 //
+  return O                                                     //
+         && O.mapOptional("Description", R.Description)        //
+         && O.mapOptional("Declarations", R.Declarations)      //
+         && O.mapOptional("Definitions", R.Definitions)        //
+         && O.mapOptional("Example", R.Example)                //
+         && O.mapOptional("Type", R.Type)                      //
+         && O.mapOptional("ValueAttrNames", R.ValueAttrNames)  //
       ;
 }
 

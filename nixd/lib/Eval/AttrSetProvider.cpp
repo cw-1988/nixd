@@ -14,6 +14,49 @@
 using namespace nixd;
 using namespace lspserver;
 
+namespace {
+
+constexpr int MaxValueAttrNames = 64;
+
+bool isModuleArgumentOptionPath(const AttrPathInfoParams &AttrPath) {
+  if (AttrPath.size() < 2)
+    return false;
+
+  const auto Last = AttrPath.end() - 1;
+  const auto BeforeLast = Last - 1;
+  return *BeforeLast == "_module" &&
+         (*Last == "args" || *Last == "specialArgs");
+}
+
+void fillOptionValueAttrNames(nix::EvalState &State, nix::Value &Option,
+                              OptionDescription &R) {
+  nix::Value *Value = nullptr;
+  try {
+    State.forceValue(Option, nix::noPos);
+    if (Option.type() != nix::ValueType::nAttrs || !Option.attrs())
+      return;
+    const auto *It = Option.attrs()->get(State.symbols.create("value"));
+    if (!It || !It->value)
+      return;
+    Value = It->value;
+    State.forceValue(*Value, nix::noPos);
+  } catch (const std::exception &) {
+    return;
+  }
+
+  if (!Value || Value->type() != nix::ValueType::nAttrs || !Value->attrs())
+    return;
+
+  int Count = 0;
+  for (const nix::Attr *Attr : Value->attrs()->lexicographicOrder(State.symbols)) {
+    R.ValueAttrNames.emplace_back(State.symbols[Attr->name]);
+    if (++Count >= MaxValueAttrNames)
+      break;
+  }
+}
+
+} // namespace
+
 AttrSetProvider::AttrSetProvider(std::unique_ptr<InboundPort> In,
                                  std::unique_ptr<OutboundPort> Out)
     : LSPServer(std::move(In), std::move(Out)),
@@ -106,6 +149,8 @@ void AttrSetProvider::onOptionInfo(
 
     OptionInfoResponse R;
     fillOptionDescription(state(), Option, R);
+    if (isModuleArgumentOptionPath(AttrPath))
+      fillOptionValueAttrNames(state(), Option, R);
 
     Reply(std::move(R));
     return;

@@ -10,6 +10,8 @@
 #include "PathResolve.h"
 
 #include "nixd/Controller/Controller.h"
+#include "nixd/Controller/FlakeInputInspect.h"
+#include "nixd/Controller/ModuleInputInspect.h"
 #include "nixd/Protocol/AttrSet.h"
 
 #include "lspserver/Protocol.h"
@@ -27,6 +29,8 @@
 #include <nixf/Sema/VariableLookup.h>
 
 #include <exception>
+#include <filesystem>
+#include <functional>
 #include <semaphore>
 
 using namespace nixd;
@@ -233,6 +237,46 @@ optionAttrPathScope(const Node &N, const ParentMapAnalysis &PM) {
   return Scope;
 }
 
+Locations defineModuleInputInspection(
+    const ModuleInputInspectContext &Context, std::string_view File,
+    const std::function<std::vector<ResolvedOptionField>(
+        const std::vector<std::string> &, const std::string &)> &CompleteOptions,
+    const ModuleInputAttrCompleter &CompleteAttrs) {
+  std::string Content = renderModuleInputInspectionDocument(
+      Context.Input, Context.Scope, Context.Sources, File, CompleteOptions,
+      CompleteAttrs);
+  std::filesystem::path Path =
+      writeModuleInputInspectionFile(Context.Input, File, std::move(Content));
+
+  const std::string PathStr = Path.string();
+  return Locations{Location{
+      .uri = URIForFile::canonicalize(PathStr, PathStr),
+      .range = {{0, 0}, {0, 0}},
+  }};
+}
+
+Locations defineFlakeInputInspection(const FlakeOutputInputContext &Context,
+                                     std::string_view File) {
+  std::string Content = renderFlakeOutputInputInspectionDocument(Context, File);
+  std::filesystem::path Path =
+      writeFlakeOutputInputInspectionFile(Context, File, std::move(Content));
+
+  const std::string PathStr = Path.string();
+  return Locations{Location{
+      .uri = URIForFile::canonicalize(PathStr, PathStr),
+      .range = {{0, 0}, {0, 0}},
+  }};
+}
+
+std::optional<std::vector<std::string>>
+nixpkgsScopeForModuleInput(std::string_view Input) {
+  if (Input == "pkgs")
+    return std::vector<std::string>{};
+  if (Input == "lib")
+    return std::vector<std::string>{"lib"};
+  return std::nullopt;
+}
+
 /// \brief Get nixpkgs definition from a selector.
 Locations defineNixpkgsSelector(const Selector &Sel,
                                 AttrSetClient &NixpkgsClient) {
@@ -345,11 +389,57 @@ void Controller::onDefinition(const TextDocumentPositionParams &Params,
       const auto &VLA = *TU->variableLookup();
       const auto &PM = *TU->parentMap();
       const auto &N = *CheckDefault(AST->descend({Pos, Pos}));
-      const auto &UpExpr = *CheckDefault(PM.upExpr(N));
+
+      if (std::optional<FlakeOutputInputContext> Context =
+              findFlakeOutputInputContext(N, VLA, PM, File))
+        return defineFlakeInputInspection(*Context, File);
+
+      auto Resolve = [&](const std::vector<std::string> &Scope) {
+        return resolveOptionInfosForFile(File, Scope);
+      };
+      if (std::optional<ModuleInputInspectContext> Context =
+              findModuleInputInspectContext(N, VLA, PM, Resolve)) {
+        auto Complete = [&](const std::vector<std::string> &Scope,
+                            const std::string &Prefix) {
+          return completeDerivedOptionsForFile(File, Scope, Prefix);
+        };
+        ModuleInputAttrCompleter CompleteAttrs;
+        if (std::optional<std::vector<std::string>> NixpkgsScope =
+                nixpkgsScopeForModuleInput(Context->Input)) {
+          CompleteAttrs =
+              [this, Root = std::move(*NixpkgsScope)](
+                  const std::vector<std::string> &Scope,
+                  const std::string &Prefix) mutable {
+                std::vector<std::string> FullScope = Root;
+                FullScope.insert(FullScope.end(), Scope.begin(), Scope.end());
+                std::binary_semaphore Ready(0);
+                std::vector<std::string> Names;
+                auto OnReply =
+                    [&Ready, &Names](
+                        llvm::Expected<AttrPathCompleteResponse> Resp) {
+                      if (Resp)
+                        Names = std::move(*Resp);
+                      else
+                        consumeError(Resp.takeError());
+                      Ready.release();
+                    };
+                nixpkgsClient()->attrpathComplete(
+                    AttrPathCompleteParams{.Scope = std::move(FullScope),
+                                           .Prefix = Prefix},
+                    std::move(OnReply));
+                Ready.acquire();
+                return Names;
+              };
+        }
+        return defineModuleInputInspection(*Context, File, Complete,
+                                           CompleteAttrs);
+      }
 
       // Special case for inherited names.
       if (const ExprVar *Var = findInheritVar(N, PM, VLA))
         return defineVar(*Var, VLA, PM, *nixpkgsClient(), URI, TU->src());
+
+      const auto &UpExpr = *CheckDefault(PM.upExpr(N));
 
       switch (UpExpr.kind()) {
       case Node::NK_ExprVar: {
@@ -374,7 +464,7 @@ void Controller::onDefinition(const TextDocumentPositionParams &Params,
       default:
         break;
       }
-      return error("unknown node type for definition");
+      return Locations{};
     }()));
   };
   postToPool(std::move(Action));
