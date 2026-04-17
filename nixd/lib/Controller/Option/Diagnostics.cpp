@@ -3,6 +3,7 @@
 #include "Validation.h"
 #include "Navigation.h"
 #include "nixd/Controller/Controller.h"
+#include "nixd/Controller/FlakeInputInspect.h"
 #include "nixd/Controller/Option.h"
 
 #include <algorithm>
@@ -11,11 +12,13 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string_view>
 #include <tuple>
 #include <unordered_set>
 
 #include <nixf/Basic/Nodes/Attrs.h>
+#include <nixf/Basic/Nodes/Lambda.h>
 
 using namespace nixd;
 using namespace nixd::option_diagnostics;
@@ -247,6 +250,85 @@ bool isNestedInOptionDeclarationCall(const Binding &Bind,
   return false;
 }
 
+bool isOutputsBinding(const Binding &Bind) {
+  const auto &Names = Bind.path().names();
+  return !Names.empty() && Names.front() && Names.front()->isStatic() &&
+         Names.front()->staticName() == "outputs";
+}
+
+bool isOutputsLambda(const ExprLambda &Lambda, const ParentMapAnalysis &PM) {
+  const Node *Current = &Lambda;
+  std::unordered_set<const Node *> Seen;
+  while (Current && Seen.insert(Current).second) {
+    const Node *Parent = PM.query(*Current);
+    if (!Parent)
+      return false;
+
+    if (Parent->kind() == Node::NK_ExprParen) {
+      const auto &Paren = static_cast<const ExprParen &>(*Parent);
+      if (Paren.expr() && Paren.expr() == Current) {
+        Current = Parent;
+        continue;
+      }
+      return false;
+    }
+
+    if (Parent->kind() != Node::NK_Binding)
+      return false;
+
+    const auto &Bind = static_cast<const Binding &>(*Parent);
+    return Bind.value().get() == Current && isOutputsBinding(Bind);
+  }
+  return false;
+}
+
+std::string renderQuotedList(const std::vector<FlakeOutputInput> &Inputs) {
+  std::ostringstream OS;
+  for (size_t I = 0; I < Inputs.size(); ++I) {
+    if (I)
+      OS << ", ";
+    OS << "`" << Inputs[I].Name << "`";
+  }
+  return OS.str();
+}
+
+std::vector<NixdDiagnostic>
+validateFlakeOutputInputs(const ExprLambda &Lambda,
+                          const ParentMapAnalysis &PM) {
+  if (!isOutputsLambda(Lambda, PM) || !Lambda.arg() ||
+      !Lambda.arg()->formals())
+    return {};
+
+  std::vector<FlakeOutputInput> Inputs = collectFlakeOutputInputs(Lambda, PM);
+  std::set<std::string> InputNames;
+  for (const FlakeOutputInput &Input : Inputs)
+    InputNames.insert(Input.Name);
+
+  std::vector<NixdDiagnostic> Diagnostics;
+  const std::string Available = renderQuotedList(Inputs);
+  for (const std::shared_ptr<Formal> &Formal :
+       Lambda.arg()->formals()->members()) {
+    if (!Formal || Formal->isEllipsis() || !Formal->id() ||
+        Formal->defaultExpr())
+      continue;
+
+    const std::string &Name = Formal->id()->name();
+    if (InputNames.contains(Name))
+      continue;
+
+    Diagnostics.emplace_back(NixdDiagnostic{
+        .Range = Formal->id()->range(),
+        .Severity = NixdDiagnosticSeverity::Error,
+        .Code = "flake-output-input-unknown",
+        .Source = "nixd",
+        .Message = "flake output input `" + Name +
+                   "` is not provided by `self` or `inputs`; available inputs: " +
+                   Available,
+    });
+  }
+  return Diagnostics;
+}
+
 std::optional<std::vector<std::string>>
 enclosingBindingScope(const Binding &Bind, const ParentMapAnalysis &PM) {
   const Node *Current = &Bind;
@@ -451,6 +533,13 @@ void collectOptionDiagnosticsFromNode(
     std::vector<NixdDiagnostic> NewDiagnostics = validateOptionBinding(
         static_cast<const Binding &>(Desc), PM, VLA, IsFlakeSchema, Context,
         Resolve, Complete);
+    std::move(NewDiagnostics.begin(), NewDiagnostics.end(),
+              std::back_inserter(Diagnostics));
+  }
+
+  if (IsFlakeSchema && Desc.kind() == Node::NK_ExprLambda) {
+    std::vector<NixdDiagnostic> NewDiagnostics =
+        validateFlakeOutputInputs(static_cast<const ExprLambda &>(Desc), PM);
     std::move(NewDiagnostics.begin(), NewDiagnostics.end(),
               std::back_inserter(Diagnostics));
   }

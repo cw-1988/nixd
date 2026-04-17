@@ -63,7 +63,7 @@
 
 ```
 CHECK: "diagnostics": []
-CHECK: "value": "## Type\n\n`str` - string\n\n## Description\n\nA short human-readable description of the flake."
+CHECK: "value": "\"type\": `str` - string  \n\"description\": A short human-readable description of the flake."
 ```
 
 <-- textDocument/hover(2)
@@ -86,7 +86,7 @@ CHECK: "value": "## Type\n\n`str` - string\n\n## Description\n\nA short human-re
 ```
 
 ```
-CHECK: "value": "## Type\n\n`str` - string"
+CHECK: "value": "\"type\": `str` - string"
 ```
 
 <-- textDocument/didOpen
@@ -123,8 +123,28 @@ CHECK: "message": "unknown option `output`"
 ```
 
 ```
-CHECK: "message": "value for option `outputs.apps.x86_64-linux.demo.type` has type `integer`, expected `str string`"
-CHECK: "message": "value for option `outputs.apps.x86_64-linux.demo.program` has type `integer`, expected `str string`"
+CHECK: "message": "value for option `outputs.<return>.apps.x86_64-linux.demo.type` has type `integer`, expected `str string`"
+CHECK: "message": "value for option `outputs.<return>.apps.x86_64-linux.demo.program` has type `integer`, expected `str string`"
+```
+
+<-- textDocument/didOpen
+
+```nix file:///missing-input/flake.nix
+{
+  inputs.nipkgs.url = "github:NixOS/nixpkgs";
+
+  outputs =
+    { nixpkgs, ... }:
+    {
+      packages.x86_64-linux.default =
+        nixpkgs.legacyPackages.x86_64-linux.hello;
+    };
+}
+```
+
+```
+CHECK: "code": "flake-output-input-unknown"
+CHECK: "message": "flake output input `nixpkgs` is not provided by `self` or `inputs`; available inputs: `self`, `nipkgs`"
 ```
 
 ```json
