@@ -55,7 +55,7 @@
 ```
 CHECK:      "id": 1,
 CHECK:      "kind": "markdown",
-CHECK:      "value": "\"type\": `str` - string"
+CHECK:      "value": "**Type** `str` - string"
 ```
 
 ```json

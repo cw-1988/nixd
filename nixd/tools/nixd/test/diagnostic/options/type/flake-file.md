@@ -63,7 +63,7 @@
 
 ```
 CHECK: "diagnostics": []
-CHECK: "value": "\"type\": `str` - string  \n\"description\": A short human-readable description of the flake."
+CHECK: "value": "**Type** `str` - string  \n**Description** A short human-readable description of the flake."
 ```
 
 <-- textDocument/hover(2)
@@ -86,7 +86,7 @@ CHECK: "value": "\"type\": `str` - string  \n\"description\": A short human-read
 ```
 
 ```
-CHECK: "value": "\"type\": `str` - string"
+CHECK: "value": "**Type** `str` - string"
 ```
 
 <-- textDocument/didOpen
