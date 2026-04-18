@@ -15,6 +15,7 @@
 
 #include <boost/asio/post.hpp>
 
+#include <llvm/Support/Error.h>
 #include <llvm/Support/CommandLine.h>
 
 using namespace nixd;
@@ -43,47 +44,51 @@ opt<bool> EnableSemanticTokens{"semantic-tokens",
                                init(false), cat(NixdCategory)};
 
 // Here we try to wrap nixpkgs, nixos options in a single emtpy attrset in test.
-std::string getDefaultNixpkgsExpr() {
+} // namespace
+
+std::string nixd::getDefaultNixpkgsExpr() {
   if (LitTest && !DefaultNixpkgsExpr.getNumOccurrences()) {
     return "{ }";
   }
   return DefaultNixpkgsExpr;
 }
 
-std::string getDefaultNixOSOptionsExpr() {
+std::string nixd::getDefaultNixOSOptionsExpr() {
   if (LitTest && !DefaultNixOSOptionsExpr.getNumOccurrences()) {
     return "{ }";
   }
   return DefaultNixOSOptionsExpr;
 }
 
-} // namespace
-
 void Controller::evalExprWithProgress(AttrSetClient &Client,
                                       const EvalExprParams &Params,
                                       std::string_view Description,
                                       llvm::unique_function<void()> OnSuccess,
-                                      llvm::unique_function<void(bool)> OnDone) {
+                                      llvm::unique_function<void(
+                                          bool, std::optional<std::string>)>
+                                          OnDone) {
   auto Token = rand();
   auto Action = [Token, Description = std::string(Description),
                  OnSuccess = std::move(OnSuccess),
                  OnDone = std::move(OnDone),
                  this](llvm::Expected<EvalExprResponse> Resp) mutable {
     bool Success = false;
+    std::optional<std::string> ErrorMessage;
     endWorkDoneProgress({
         .token = Token,
         .value = WorkDoneProgressEnd{.message = "evaluated " +
                                                 std::string(Description)},
     });
     if (!Resp) {
-      lspserver::elog("{0} eval expr: {1}", Description, Resp.takeError());
+      ErrorMessage = llvm::toString(Resp.takeError());
+      lspserver::elog("{0} eval expr: {1}", Description, *ErrorMessage);
     } else {
       Success = true;
       if (OnSuccess)
         OnSuccess();
     }
     if (OnDone)
-      OnDone(Success);
+      OnDone(Success, std::move(ErrorMessage));
   };
   createWorkDoneProgress({Token});
   beginWorkDoneProgress({.token = Token,
@@ -192,21 +197,10 @@ void Controller::
   }
 
   // Launch nixos worker also.
-  AttrSetClient *NixOSOptionsClient = nullptr;
   {
     std::lock_guard _(OptionsLock);
     startOption("nixos", Options["nixos"]);
-
-    NixOSOptionsClient = Options["nixos"]->client();
   }
-  if (NixOSOptionsClient)
-    evalExprWithProgress(
-        *NixOSOptionsClient, getDefaultNixOSOptionsExpr(), "nixos options",
-        [this]() { noteOptionProviderChanged("nixos"); },
-        [this](bool Success) {
-          if (!Success)
-            noteOptionProviderSettled("nixos");
-        });
   try {
     Config = parseCLIConfig();
   } catch (LLVMErrorException &Err) {
@@ -214,10 +208,14 @@ void Controller::
                     Err.takeError());
     std::exit(-1);
   }
+  enqueueOptionProviderReevaluation();
   fetchConfig();
 }
 
-void Controller::onInitialized(const lspserver::InitializedParams &Params) {}
+void Controller::onInitialized(
+    [[maybe_unused]] const lspserver::InitializedParams &Params) {
+  registerNixFileWatchers();
+}
 
 void Controller::onShutdown(const lspserver::NoParams &,
                             lspserver::Callback<std::nullptr_t> Reply) {

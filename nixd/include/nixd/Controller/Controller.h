@@ -15,9 +15,12 @@
 #include <boost/asio/post.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <map>
+#include <optional>
 #include <set>
 #include <string_view>
 #include <utility>
@@ -37,10 +40,21 @@ private:
 
   std::mutex OptionsLock;
   std::condition_variable OptionsReadyCV;
+  std::mutex OptionReevaluationLock;
+  bool OptionReevaluationRunning = false;       // GUARDED_BY(OptionReevaluationLock)
+  bool OptionReevaluationQueued = false;        // GUARDED_BY(OptionReevaluationLock)
+  bool OptionReevaluationRestartWorkers = false; // GUARDED_BY(OptionReevaluationLock)
+  std::mutex OptionProviderSaveLock;
+  std::map<std::string, std::chrono::steady_clock::time_point>
+      RecentOptionProviderSaves; // GUARDED_BY(OptionProviderSaveLock)
   OptionService OptService;
   std::map<std::string, std::uint64_t>
       OptionGenerations;                  // GUARDED_BY(OptionsLock)
   std::uint64_t NextOptionGeneration = 1; // GUARDED_BY(OptionsLock)
+  std::map<std::string, std::uint64_t>
+      OptionEvalGenerations;                   // GUARDED_BY(OptionsLock)
+  std::uint64_t NextOptionEvalGeneration = 1; // GUARDED_BY(OptionsLock)
+  std::map<std::string, std::string> OptionProviderErrors; // GUARDED_BY(OptionsLock)
   std::set<std::string> ReadyOptions;     // GUARDED_BY(OptionsLock)
   std::set<std::string> SettledOptions;   // GUARDED_BY(OptionsLock)
   // Map of option providers.
@@ -59,7 +73,9 @@ private:
   void evalExprWithProgress(AttrSetClient &Client, const EvalExprParams &Params,
                             std::string_view Description,
                             llvm::unique_function<void()> OnSuccess = nullptr,
-                            llvm::unique_function<void(bool)> OnDone = nullptr);
+                            llvm::unique_function<void(
+                                bool, std::optional<std::string>)> OnDone =
+                                nullptr);
 
   lspserver::DraftStore Store;
 
@@ -71,9 +87,13 @@ private:
   llvm::unique_function<void(const lspserver::ConfigurationParams &,
                              lspserver::Callback<llvm::json::Value>)>
       WorkspaceConfiguration;
+  llvm::unique_function<void(const llvm::json::Value &,
+                             lspserver::Callback<std::nullptr_t>)>
+      RegisterCapability;
 
   void workspaceConfiguration(const lspserver::ConfigurationParams &Params,
                               lspserver::Callback<llvm::json::Value> Reply);
+  void registerNixFileWatchers();
 
   /// \brief Update the configuration, do necessary adjusting for updates.
   ///
@@ -82,6 +102,10 @@ private:
 
   /// \brief Get configuration from LSP client. Update the config.
   void fetchConfig();
+  void enqueueOptionProviderReevaluation(bool RestartWorkers = false);
+  void reevaluateOptionProviders(bool RestartWorkers = false);
+  void noteOptionProviderFileSaved(lspserver::PathRef File);
+  void reevaluateOptionProvidersForFileChange(lspserver::PathRef File);
 
   llvm::unique_function<void(const lspserver::PublishDiagnosticsParams &)>
       PublishDiagnostic;
@@ -212,6 +236,7 @@ private:
   onDocumentDidChange(const lspserver::DidChangeTextDocumentParams &Params);
 
   void onDocumentDidClose(const lspserver::DidCloseTextDocumentParams &Params);
+  void onDocumentDidSave(const lspserver::DidSaveTextDocumentParams &Params);
 
   void
   onCodeAction(const lspserver::CodeActionParams &Params,
@@ -274,13 +299,18 @@ private:
   /// Determine whether or not this diagnostic is suppressed.
   bool isSuppressed(nixf::Diagnostic::DiagnosticKind Kind);
   bool isNixdDiagnosticSuppressed(std::string_view Code);
-  void noteOptionProviderChanged(std::string_view Name);
-  void noteOptionProviderSettled(std::string_view Name);
+  bool noteOptionProviderChanged(std::string_view Name,
+                                 std::uint64_t EvalGeneration);
+  bool noteOptionProviderSettled(
+      std::string_view Name, std::uint64_t EvalGeneration,
+      std::optional<std::string> Error = std::nullopt);
   bool allOptionProvidersReadyLocked() const;
   bool allOptionProvidersSettledLocked() const;
   bool waitForOptionProvidersReadyForTests();
   bool optionProvidersReadyForDiagnostics();
+  bool optionProvidersSettledForDiagnostics();
   std::vector<OptionProviderRef> optionProviderSnapshot();
+  std::vector<std::pair<std::string, std::string>> optionProviderFailureSnapshot();
   std::vector<ResolvedOptionField>
   completeOptions(const std::vector<std::string> &Scope,
                   const std::string &Prefix);
@@ -301,6 +331,10 @@ private:
                                    const std::vector<std::string> &Scope);
   std::vector<ResolvedOptionInfo>
   resolveDerivedOptionInfos(const std::vector<std::string> &Scope);
+  std::vector<lspserver::Location>
+  optionDefinitionLocationsForFile(std::string_view File,
+                                   const std::vector<std::string> &Scope,
+                                   const std::vector<std::string> &FullScope);
   std::vector<lspserver::Location>
   optionDeclarationLocations(const std::vector<std::string> &Scope);
   std::vector<NixdDiagnostic> collectOptionDiagnostics(const NixTU &TU,
@@ -330,6 +364,8 @@ private:
   //---------------------------------------------------------------------------/
   void onDidChangeConfiguration(
       const lspserver::DidChangeConfigurationParams &Params);
+  void onDidChangeWatchedFiles(
+      const lspserver::DidChangeWatchedFilesParams &Params);
 
 public:
   Controller(std::unique_ptr<lspserver::InboundPort> In,

@@ -2,11 +2,16 @@
 
 #include <llvm/Support/CommandLine.h>
 
+#include <string>
+
 namespace nixd {
 
 extern llvm::cl::OptionCategory NixdCategory;
 
 /// \brief Indicating that we are in lit-test mode.
 extern llvm::cl::opt<bool> LitTest;
+
+std::string getDefaultNixpkgsExpr();
+std::string getDefaultNixOSOptionsExpr();
 
 } // namespace nixd

@@ -141,7 +141,8 @@ struct OptionFieldHoverContext {
 };
 
 std::optional<OptionFieldHoverContext>
-findOptionFieldHoverContext(const Node &N, const ParentMapAnalysis &PM) {
+findOptionFieldHoverContext(const Node &N, const ParentMapAnalysis &PM,
+                            const OptionInfoResolver &Resolve) {
   std::optional<std::vector<std::string>> AttrPrefix =
       staticAttrPathPrefix(N, PM);
   if (!AttrPrefix || AttrPrefix->empty())
@@ -160,14 +161,14 @@ findOptionFieldHoverContext(const Node &N, const ParentMapAnalysis &PM) {
   std::set<const Node *> SeenBindings;
   while (BindingNode && SeenBindings.insert(BindingNode).second) {
     const auto &Binding = static_cast<const nixf::Binding &>(*BindingNode);
-    if (std::optional<std::vector<std::string>> Scope =
-            findOptionBindingScope(Binding, PM)) {
+    if (std::optional<SemanticOptionBinding> Semantic =
+            findSemanticOptionBinding(Binding, PM, Resolve)) {
       if (!SelectedBinding) {
         SelectedBinding = &Binding;
-        SelectedScope = std::move(*Scope);
-      } else if (!isPrefixOrEqual(*Scope, SelectedScope)) {
+        SelectedScope = std::move(Semantic->Scope);
+      } else if (!isPrefixOrEqual(Semantic->Scope, SelectedScope)) {
         SelectedBinding = &Binding;
-        SelectedScope = std::move(*Scope);
+        SelectedScope = std::move(Semantic->Scope);
       } else {
         break;
       }
@@ -250,7 +251,7 @@ std::optional<Hover> hoverOptionValueField(
 std::string mkOptionMarkdown(const OptionDescription &Desc) {
   std::ostringstream OS;
 
-  OS << "\"type\": ";
+  OS << "**Type** ";
   if (Desc.Type) {
     const std::string Rendered = renderOptionTypeInline(*Desc.Type);
     OS << (Rendered.empty() ? "? (missing type)" : Rendered);
@@ -259,7 +260,7 @@ std::string mkOptionMarkdown(const OptionDescription &Desc) {
   }
 
   if (Desc.Description)
-    OS << "  \n\"description\": " << *Desc.Description;
+    OS << "  \n**Description** " << *Desc.Description;
 
   return OS.str();
 }
@@ -500,8 +501,7 @@ std::optional<OptionType> findSubmoduleType(const OptionType &Type,
 
   const std::string LowerName = option_navigation::lowerTypeName(Type);
   if (LowerName == "nullor") {
-    if (std::optional<OptionType> Elem =
-            option_navigation::nullOrTypeFor(Type))
+    if (std::optional<OptionType> Elem = option_navigation::nullOrTypeFor(Type))
       return findSubmoduleType(*Elem, Depth + 1);
   }
   if (LowerName == "unique") {
@@ -550,7 +550,7 @@ std::optional<OptionType> resolveSubmoduleTypeForLambda(
     const std::function<std::vector<ResolvedOptionInfo>(
         const std::vector<std::string> &)> &Resolve) {
   std::optional<OptionValueContext> Context =
-      findOptionValueContext(Lambda, PM, Lambda.lCur().position());
+      findOptionValueContext(Lambda, PM, Lambda.lCur().position(), Resolve);
   if (!Context)
     return std::nullopt;
 
@@ -577,14 +577,15 @@ struct ModuleInputs {
   std::set<std::string> SpecialArgs;
 };
 
-std::vector<std::string> appendScope(std::vector<std::string> Scope,
-                                     std::initializer_list<std::string> Suffix) {
+std::vector<std::string>
+appendScope(std::vector<std::string> Scope,
+            std::initializer_list<std::string> Suffix) {
   Scope.insert(Scope.end(), Suffix.begin(), Suffix.end());
   return Scope;
 }
 
-std::set<std::string> valueAttrNameSet(
-    const std::vector<ResolvedOptionInfo> &Infos) {
+std::set<std::string>
+valueAttrNameSet(const std::vector<ResolvedOptionInfo> &Infos) {
   std::set<std::string> Names;
   for (const ResolvedOptionInfo &Info : Infos)
     Names.insert(Info.Description.ValueAttrNames.begin(),
@@ -594,19 +595,20 @@ std::set<std::string> valueAttrNameSet(
 
 std::optional<std::vector<std::string>>
 moduleInputScopeForLambda(const ExprLambda &Lambda,
-                          const ParentMapAnalysis &PM) {
+                          const ParentMapAnalysis &PM,
+                          const OptionInfoResolver &Resolve) {
   if (std::optional<OptionValueContext> Context =
-          findOptionValueContext(Lambda, PM, Lambda.lCur().position()))
+          findOptionValueContext(Lambda, PM, Lambda.lCur().position(), Resolve))
     return std::move(Context->Scope);
   if (isTopLevelLambda(Lambda, PM))
     return std::vector<std::string>{};
   return std::nullopt;
 }
 
-ModuleInputs resolveModuleInputs(
-    const std::vector<std::string> &Scope,
-    const std::function<std::vector<ResolvedOptionInfo>(
-        const std::vector<std::string> &)> &Resolve) {
+ModuleInputs
+resolveModuleInputs(const std::vector<std::string> &Scope,
+                    const std::function<std::vector<ResolvedOptionInfo>(
+                        const std::vector<std::string> &)> &Resolve) {
   ModuleInputs Inputs;
   Inputs.Core = {"config", "lib", "options", "specialArgs"};
   Inputs.ModuleArgs =
@@ -695,16 +697,16 @@ std::string mkModuleEllipsisMarkdown(const ModuleInputs &Inputs,
   return OS.str();
 }
 
-std::optional<Hover> hoverModuleInput(
-    const ModuleInputContext &Context, llvm::StringRef Src,
-    const ParentMapAnalysis &PM,
-    const std::function<std::vector<ResolvedOptionInfo>(
-        const std::vector<std::string> &)> &Resolve) {
+std::optional<Hover>
+hoverModuleInput(const ModuleInputContext &Context, llvm::StringRef Src,
+                 const ParentMapAnalysis &PM,
+                 const std::function<std::vector<ResolvedOptionInfo>(
+                     const std::vector<std::string> &)> &Resolve) {
   if (!Context.Lambda || !Context.RangeNode)
     return std::nullopt;
 
   std::optional<std::vector<std::string>> Scope =
-      moduleInputScopeForLambda(*Context.Lambda, PM);
+      moduleInputScopeForLambda(*Context.Lambda, PM, Resolve);
   if (!Scope)
     return std::nullopt;
 
@@ -909,11 +911,10 @@ void Controller::onHover(const TextDocumentPositionParams &Params,
         if (Context->InputKind == FlakeOutputInputContext::Kind::Ellipsis) {
           Docs = renderFlakeOutputEllipsisMarkdown(Context->Inputs);
         } else {
-          auto It = std::find_if(
-              Context->Inputs.begin(), Context->Inputs.end(),
-              [&](const FlakeOutputInput &Input) {
-                return Input.Name == Context->Name;
-              });
+          auto It = std::find_if(Context->Inputs.begin(), Context->Inputs.end(),
+                                 [&](const FlakeOutputInput &Input) {
+                                   return Input.Name == Context->Name;
+                                 });
           if (It != Context->Inputs.end())
             Docs = renderFlakeOutputInputMarkdown(Context->Name, *It);
         }
@@ -936,7 +937,7 @@ void Controller::onHover(const TextDocumentPositionParams &Params,
           if (flake_schema::isFlakeFile(File) && Context->Lambda &&
               flake_schema::isInsideOutputsBody(*Context->Lambda, PM))
             AdjustedScope = flake_schema::outputsBodyScope(AdjustedScope);
-          return resolveOptionInfosForFile(File, AdjustedScope);
+          return resolveDerivedOptionInfosForFile(File, AdjustedScope);
         };
         if (std::optional<Hover> H =
                 hoverModuleInput(*Context, TU->src(), PM, Resolve))
@@ -964,7 +965,7 @@ void Controller::onHover(const TextDocumentPositionParams &Params,
           };
           if (std::optional<OptionDescription> Desc =
                   resolveHoverOptionDescription(Scope, Resolve, ResolveDerived,
-                                               CompleteDerived)) {
+                                                CompleteDerived)) {
             std::string Docs = mkOptionMarkdown(*Desc);
             return Hover{
                 .contents =
@@ -978,7 +979,18 @@ void Controller::onHover(const TextDocumentPositionParams &Params,
         }
 
         if (std::optional<OptionFieldHoverContext> Context =
-                findOptionFieldHoverContext(N, PM)) {
+                findOptionFieldHoverContext(
+                    N, PM, [&](const std::vector<std::string> &Scope) {
+                      if (flake_schema::isFlakeFile(File)) {
+                        std::vector<ResolvedOptionInfo> Infos =
+                            flake_schema::resolveDerived(Scope);
+                        if (!Infos.empty())
+                          return Infos;
+                        return flake_schema::resolveDerived(
+                            flake_schema::outputsBodyScope(Scope));
+                      }
+                      return resolveDerivedOptionInfosForFile(File, Scope);
+                    })) {
           if (flake_schema::isFlakeFile(File) &&
               flake_schema::isInsideOutputsBody(N, PM))
             Context->Scope = flake_schema::outputsBodyScope(Context->Scope);

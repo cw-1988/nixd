@@ -142,7 +142,7 @@ void Controller::onCodeAction(const lspserver::CodeActionParams &Params,
             addExtractToFileAction(*N, *TU->parentMap(), *TU->variableLookup(),
                                    FileURI, TU->src(), Actions);
             auto Resolve = [&](const std::vector<std::string> &Scope) {
-              return resolveOptionInfosForFile(File, Scope);
+              return resolveDerivedOptionInfosForFile(File, Scope);
             };
             addInspectModuleInputAction(*N, *TU->parentMap(),
                                         *TU->variableLookup(), File, Resolve,

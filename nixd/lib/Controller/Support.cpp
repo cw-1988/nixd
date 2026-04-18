@@ -135,6 +135,8 @@ Controller::Controller(std::unique_ptr<lspserver::InboundPort> In,
                            &Controller::onDocumentDidOpen);
   Registry.addNotification("textDocument/didChange", this,
                            &Controller::onDocumentDidChange);
+  Registry.addNotification("textDocument/didSave", this,
+                           &Controller::onDocumentDidSave);
 
   Registry.addNotification("textDocument/didClose", this,
                            &Controller::onDocumentDidClose);
@@ -172,9 +174,13 @@ Controller::Controller(std::unique_ptr<lspserver::InboundPort> In,
   // Workspace features
   Registry.addNotification("workspace/didChangeConfiguration", this,
                            &Controller::onDidChangeConfiguration);
+  Registry.addNotification("workspace/didChangeWatchedFiles", this,
+                           &Controller::onDidChangeWatchedFiles);
 
   WorkspaceConfiguration = mkOutMethod<ConfigurationParams, llvm::json::Value>(
       "workspace/configuration");
+  RegisterCapability =
+      mkOutMethod<llvm::json::Value, std::nullptr_t>("client/registerCapability");
 
   PublishDiagnostic = mkOutNotifiction<PublishDiagnosticsParams>(
       "textDocument/publishDiagnostics");

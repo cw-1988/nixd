@@ -6,6 +6,7 @@
 #include "nixf/Sema/ParentMap.h"
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -94,6 +95,15 @@ struct ResolvedOptionField {
   OptionField Field;
 };
 
+using OptionInfoResolver =
+    std::function<std::vector<ResolvedOptionInfo>(
+        const std::vector<std::string> &)>;
+
+struct SemanticOptionBinding {
+  const nixf::Binding *Binding = nullptr;
+  std::vector<std::string> Scope;
+};
+
 /// OptionType: conservative interpretation of option metadata and Nix literals.
 std::optional<ParsedOptionType> parseOptionType(const OptionType &Type);
 OptionLiteralKind classifyOptionLiteral(const nixf::Expr &Expr);
@@ -105,11 +115,17 @@ std::string optionLiteralKindName(OptionLiteralKind Kind);
 /// OptionContext: AST helpers for option paths and option value positions.
 std::optional<OptionValueContext>
 findOptionValueContext(const nixf::Node &Node,
-                       const nixf::ParentMapAnalysis &PM, nixf::Position Pos);
+                       const nixf::ParentMapAnalysis &PM, nixf::Position Pos,
+                       const OptionInfoResolver &Resolve);
 
 std::optional<std::vector<std::string>>
 findOptionBindingScope(const nixf::Binding &Binding,
                        const nixf::ParentMapAnalysis &PM);
+
+std::optional<SemanticOptionBinding>
+findSemanticOptionBinding(const nixf::Binding &Binding,
+                          const nixf::ParentMapAnalysis &PM,
+                          const OptionInfoResolver &Resolve);
 
 /// OptionService: shared provider IPC and option-info cache for LSP features.
 class OptionService {

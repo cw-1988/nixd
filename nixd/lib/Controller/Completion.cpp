@@ -87,18 +87,19 @@ struct EnclosingOptionAttrSet {
 };
 
 std::optional<EnclosingOptionAttrSet>
-attrSetFromNode(const Node *Current, const ParentMapAnalysis &PM) {
+attrSetFromNode(const Node *Current, const ParentMapAnalysis &PM,
+                const OptionInfoResolver &Resolve) {
   while (Current) {
     if (Current->kind() == Node::NK_ExprAttrs) {
       const Node *Parent = PM.query(*Current);
       if (Parent && Parent->kind() == Node::NK_Binding) {
         const auto &AttrBinding = static_cast<const nixf::Binding &>(*Parent);
         if (AttrBinding.value().get() == Current)
-          if (std::optional<std::vector<std::string>> Scope =
-                  findOptionBindingScope(AttrBinding, PM))
+          if (std::optional<SemanticOptionBinding> Semantic =
+                  findSemanticOptionBinding(AttrBinding, PM, Resolve))
             return EnclosingOptionAttrSet{
                 .Attrs = &static_cast<const ExprAttrs &>(*Current),
-                .Scope = std::move(*Scope),
+                .Scope = std::move(Semantic->Scope),
             };
       }
     }
@@ -112,10 +113,11 @@ attrSetFromNode(const Node *Current, const ParentMapAnalysis &PM) {
 
 std::optional<EnclosingOptionAttrSet>
 enclosingOptionAttrSetScope(const Node &AST, std::string_view Src,
-                            nixf::Position Pos, const ParentMapAnalysis &PM) {
+                            nixf::Position Pos, const ParentMapAnalysis &PM,
+                            const OptionInfoResolver &Resolve) {
   if (const Node *Desc = AST.descend({Pos, Pos}))
     if (std::optional<EnclosingOptionAttrSet> Context =
-            attrSetFromNode(Desc, PM))
+            attrSetFromNode(Desc, PM, Resolve))
       return Context;
 
   lspserver::Position LSPPos{.line = Pos.line(), .character = Pos.column()};
@@ -135,7 +137,7 @@ enclosingOptionAttrSetScope(const Node &AST, std::string_view Src,
             AST.descend({nixf::Position(PrevPos.line, PrevPos.character),
                          Pos})) {
       if (std::optional<EnclosingOptionAttrSet> Context =
-              attrSetFromNode(Desc, PM))
+              attrSetFromNode(Desc, PM, Resolve))
         return Context;
     }
   }
@@ -166,11 +168,26 @@ void Controller::onCompletion(const CompletionParams &Params,
         CompletionList List;
         const VariableLookupAnalysis &VLA = *TU->variableLookup();
         try {
+          const bool OptionsReady =
+              UsesFlakeSchema || waitForOptionProvidersReadyForTests();
           const bool InFlakeOutputsBody =
               UsesFlakeSchema && flake_schema::isInsideOutputsBody(N, PM);
+          auto Resolve = [&](const std::vector<std::string> &Scope) {
+            if (UsesFlakeSchema) {
+              std::vector<ResolvedOptionInfo> Infos =
+                  flake_schema::resolveDerived(Scope);
+              if (!Infos.empty())
+                return Infos;
+              return flake_schema::resolveDerived(
+                  flake_schema::outputsBodyScope(Scope));
+            }
+            if (!OptionsReady)
+              return std::vector<ResolvedOptionInfo>{};
+            return resolveDerivedOptionInfosForFile(File, Scope);
+          };
           const Node *UpExpr = PM.upExpr(N);
           const std::optional<EnclosingOptionAttrSet> CurrentAttrSet =
-              attrSetFromNode(&N, PM);
+              attrSetFromNode(&N, PM, Resolve);
 
           if (UpExpr && UpExpr->kind() == Node::NK_ExprAttrs) {
             if (std::optional<AttrPathCompleteParams> Params =
@@ -179,7 +196,7 @@ void Controller::onCompletion(const CompletionParams &Params,
                   InFlakeOutputsBody
                       ? flake_schema::outputsBodyScope(Params->Scope)
                       : Params->Scope;
-              if (UsesFlakeSchema || waitForOptionProvidersReadyForTests())
+              if (OptionsReady)
                 completion::completeOptionNames(
                     filterUsedOptionNames(
                         completeDerivedOptionsForFile(File, Scope,
@@ -193,11 +210,12 @@ void Controller::onCompletion(const CompletionParams &Params,
           }
 
           if (std::optional<EnclosingOptionAttrSet> Context =
-                  enclosingOptionAttrSetScope(*AST, TU->src(), Pos, PM)) {
+                  enclosingOptionAttrSetScope(*AST, TU->src(), Pos, PM,
+                                              Resolve)) {
             std::vector<std::string> Scope = Context->Scope;
             if (InFlakeOutputsBody)
               Scope = flake_schema::outputsBodyScope(Scope);
-            if (UsesFlakeSchema || waitForOptionProvidersReadyForTests())
+            if (OptionsReady)
               completion::completeOptionNames(
                   filterUsedOptionNames(
                       completeDerivedOptionsForFile(File, Scope, ""),
@@ -208,12 +226,12 @@ void Controller::onCompletion(const CompletionParams &Params,
           }
 
           if (std::optional<OptionValueContext> Context =
-                  findOptionValueContext(N, PM, Pos)) {
+                  findOptionValueContext(N, PM, Pos, Resolve)) {
             OptionValueContext ValueContext = *Context;
             if (InFlakeOutputsBody)
               ValueContext.Scope =
                   flake_schema::outputsBodyScope(ValueContext.Scope);
-            if (UsesFlakeSchema || waitForOptionProvidersReadyForTests())
+            if (OptionsReady)
               completion::completeOptionValue(
                   ValueContext,
                   resolveDerivedOptionInfosForFile(File, ValueContext.Scope),

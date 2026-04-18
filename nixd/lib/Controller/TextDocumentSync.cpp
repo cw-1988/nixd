@@ -48,4 +48,11 @@ void Controller::onDocumentDidClose(const DidCloseTextDocumentParams &Params) {
   removeDocument(File);
 }
 
+void Controller::onDocumentDidSave(
+    const lspserver::DidSaveTextDocumentParams &Params) {
+  PathRef File = Params.textDocument.uri.file();
+  noteOptionProviderFileSaved(File);
+  reevaluateOptionProvidersForFileChange(File);
+}
+
 } // namespace nixd

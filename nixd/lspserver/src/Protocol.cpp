@@ -566,6 +566,14 @@ bool fromJSON(const llvm::json::Value &Params, ClientCapabilities &R,
       R.WorkspaceConfiguration = *WorkspaceConfiguration;
     }
 
+    if (auto *DidChangeWatchedFiles =
+            Workspace->getObject("didChangeWatchedFiles")) {
+      if (auto DynamicRegistration =
+              DidChangeWatchedFiles->getBoolean("dynamicRegistration"))
+        R.WorkspaceDidChangeWatchedFilesDynamicRegistration =
+            *DynamicRegistration;
+    }
+
     if (auto *SemanticTokens = Workspace->getObject("semanticTokens")) {
       if (auto RefreshSupport = SemanticTokens->getBoolean("refreshSupport"))
         R.SemanticTokenRefreshSupport = *RefreshSupport;

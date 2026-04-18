@@ -613,6 +613,7 @@ struct ClientCapabilities {
   bool InactiveRegions = false;
 
   bool WorkspaceConfiguration = false;
+  bool WorkspaceDidChangeWatchedFilesDynamicRegistration = false;
 };
 bool fromJSON(const llvm::json::Value &, ClientCapabilities &,
               llvm::json::Path);

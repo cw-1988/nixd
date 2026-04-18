@@ -330,7 +330,8 @@ validateFlakeOutputInputs(const ExprLambda &Lambda,
 }
 
 std::optional<std::vector<std::string>>
-enclosingBindingScope(const Binding &Bind, const ParentMapAnalysis &PM) {
+enclosingBindingScope(const Binding &Bind, const ParentMapAnalysis &PM,
+                     const OptionInfoResolver &Resolve) {
   const Node *Current = &Bind;
   std::unordered_set<const Node *> Seen;
   while (Current && Seen.insert(Current).second) {
@@ -338,8 +339,10 @@ enclosingBindingScope(const Binding &Bind, const ParentMapAnalysis &PM) {
     if (!Parent)
       return std::nullopt;
     if (Parent->kind() == Node::NK_Binding)
-      return findOptionBindingScope(static_cast<const nixf::Binding &>(*Parent),
-                                    PM);
+      if (std::optional<SemanticOptionBinding> Semantic =
+              findSemanticOptionBinding(static_cast<const nixf::Binding &>(*Parent),
+                                        PM, Resolve))
+        return std::move(Semantic->Scope);
     Current = Parent;
   }
   return std::nullopt;
@@ -349,29 +352,6 @@ bool isProperPrefix(const std::vector<std::string> &Prefix,
                     const std::vector<std::string> &Scope) {
   return Prefix.size() < Scope.size() &&
          std::equal(Prefix.begin(), Prefix.end(), Scope.begin());
-}
-
-bool isListContainerType(const OptionType &Type) {
-  const std::string LowerName = option_navigation::lowerTypeName(Type);
-  if (LowerName == "listof" || LowerName == "loaof" ||
-      option_navigation::isNonEmptyListType(Type))
-    return true;
-  if (LowerName == "nullor") {
-    if (std::optional<OptionType> Elem =
-            option_navigation::nullOrTypeFor(Type))
-      return isListContainerType(*Elem);
-  }
-  if (LowerName == "unique") {
-    if (std::optional<OptionType> Elem =
-            option_navigation::elemTypeFor(Type, LowerName))
-      return isListContainerType(*Elem);
-  }
-  for (const OptionType &Alternative :
-       option_navigation::alternativeTypesFor(Type, LowerName)) {
-    if (isListContainerType(Alternative))
-      return true;
-  }
-  return false;
 }
 
 std::optional<NixdDiagnostic> validateKnownOptionPath(
@@ -389,15 +369,9 @@ std::optional<NixdDiagnostic> validateKnownOptionPath(
   const std::string &Leaf = Scope.back();
 
   if (std::optional<std::vector<std::string>> Enclosing =
-          enclosingBindingScope(Binding, PM)) {
-    if (isProperPrefix(*Enclosing, Scope)) {
-      for (const ResolvedOptionInfo &Info :
-           resolveCached(Context, *Enclosing, Resolve)) {
-        if (Info.Description.Type &&
-            isListContainerType(*Info.Description.Type))
-          return std::nullopt;
-      }
-    }
+          enclosingBindingScope(Binding, PM, Resolve)) {
+    if (isProperPrefix(*Enclosing, Scope))
+      return std::nullopt;
   }
 
   for (size_t PrefixLen = 1; PrefixLen < Scope.size(); ++PrefixLen) {
@@ -478,21 +452,36 @@ validateOptionBinding(const Binding &Binding, const ParentMapAnalysis &PM,
   if (isNestedInOptionDeclarationCall(Binding, PM))
     return {};
 
-  std::optional<std::vector<std::string>> Scope =
-      findOptionBindingScope(Binding, PM);
-  if (!Scope)
+  auto SemanticResolve = [&](const std::vector<std::string> &Scope) {
+    if (!IsFlakeSchema)
+      return Resolve(Scope);
+    std::vector<ResolvedOptionInfo> Infos = Resolve(Scope);
+    if (!Infos.empty())
+      return Infos;
+    return Resolve(flake_schema::outputsBodyScope(Scope));
+  };
+
+  std::optional<SemanticOptionBinding> Semantic =
+      findSemanticOptionBinding(Binding, PM, SemanticResolve);
+  if (!Semantic && IsFlakeSchema && !hasEnclosingBinding(Binding, PM))
+    if (std::optional<std::vector<std::string>> Scope =
+            findOptionBindingScope(Binding, PM))
+      Semantic =
+          SemanticOptionBinding{.Binding = &Binding, .Scope = std::move(*Scope)};
+  if (!Semantic)
     return {};
+  std::vector<std::string> Scope = Semantic->Scope;
   if (IsFlakeSchema && flake_schema::isInsideOutputsBody(Binding, PM))
-    Scope = flake_schema::outputsBodyScope(*Scope);
-  if (!Scope->empty() && Scope->front() == "options")
+    Scope = flake_schema::outputsBodyScope(Scope);
+  if (!Scope.empty() && Scope.front() == "options")
     return {};
 
   std::vector<ResolvedOptionInfo> Infos =
-      resolveCached(Context, *Scope, Resolve);
+      resolveCached(Context, Scope, Resolve);
 
   if (Infos.empty()) {
     if (std::optional<NixdDiagnostic> Unknown = validateKnownOptionPath(
-            Binding, PM, *Scope, Context, Resolve, Complete))
+            Binding, PM, Scope, Context, Resolve, Complete))
       return {*Unknown};
     return {};
   }
@@ -503,7 +492,7 @@ validateOptionBinding(const Binding &Binding, const ParentMapAnalysis &PM,
       continue;
 
     ValidationResult Result =
-        validateType(*Info.Description.Type, *Value, *Scope, PM, VLA);
+        validateType(*Info.Description.Type, *Value, Scope, PM, VLA);
     if (Result.Match == SchemaMatch::Matches)
       return {};
     if (Result.Match == SchemaMatch::Unknown)
@@ -580,6 +569,125 @@ bool hasRecoverySyntaxError(const NixTU &TU) {
   return false;
 }
 
+std::optional<std::vector<std::string>>
+extractOptionScopeFromProviderError(std::string_view Error) {
+  constexpr std::string_view Marker = "option `";
+  size_t MarkerPos = Error.find(Marker);
+  if (MarkerPos == std::string_view::npos)
+    return std::nullopt;
+
+  size_t Begin = MarkerPos + Marker.size();
+  size_t End = Error.find_first_of("`'", Begin);
+  if (End == std::string_view::npos || End <= Begin)
+    return std::nullopt;
+
+  std::string_view ScopeText = Error.substr(Begin, End - Begin);
+  if (ScopeText.empty())
+    return std::nullopt;
+
+  std::vector<std::string> Scope;
+  size_t Pos = 0;
+  while (Pos <= ScopeText.size()) {
+    size_t Dot = ScopeText.find('.', Pos);
+    std::string_view Segment =
+        ScopeText.substr(Pos, Dot == std::string_view::npos
+                                  ? std::string_view::npos
+                                  : Dot - Pos);
+    if (Segment.empty())
+      return std::nullopt;
+    Scope.emplace_back(Segment);
+    if (Dot == std::string_view::npos)
+      break;
+    Pos = Dot + 1;
+  }
+  return Scope.empty() ? std::nullopt : std::optional{std::move(Scope)};
+}
+
+std::optional<nixf::LexerCursorRange>
+findBindingRangeForScopeImpl(const nixf::Node &Node,
+                             const std::vector<std::string> &Scope,
+                             std::vector<std::string> Prefix) {
+  if (Node.kind() == nixf::Node::NK_ExprAttrs) {
+    const auto &Attrs = static_cast<const nixf::ExprAttrs &>(Node);
+    if (!Attrs.binds())
+      return std::nullopt;
+
+    for (const std::shared_ptr<nixf::Node> &BindNode : Attrs.binds()->bindings()) {
+      if (!BindNode || BindNode->kind() != nixf::Node::NK_Binding)
+        continue;
+
+      const auto &Binding = static_cast<const nixf::Binding &>(*BindNode);
+      std::vector<std::string> BindingScope = Prefix;
+      bool Static = true;
+      for (const auto &Name : Binding.path().names()) {
+        if (!Name || !Name->isStatic()) {
+          Static = false;
+          break;
+        }
+        BindingScope.emplace_back(Name->staticName());
+      }
+      if (!Static)
+        continue;
+
+      if (BindingScope == Scope) {
+        const auto &Names = Binding.path().names();
+        if (!Names.empty() && Names.back())
+          return Names.back()->range();
+        return Binding.range();
+      }
+
+      if (Binding.value()) {
+        if (std::optional<nixf::LexerCursorRange> Range =
+                findBindingRangeForScopeImpl(*Binding.value(), Scope,
+                                             std::move(BindingScope)))
+          return Range;
+      }
+    }
+    return std::nullopt;
+  }
+
+  for (const nixf::Node *Child : Node.children()) {
+    if (!Child)
+      continue;
+    if (std::optional<nixf::LexerCursorRange> Range =
+            findBindingRangeForScopeImpl(*Child, Scope, Prefix))
+      return Range;
+  }
+  return std::nullopt;
+}
+
+std::optional<nixf::LexerCursorRange>
+findBindingRangeForScope(const nixf::Node &Node,
+                         const std::vector<std::string> &Scope) {
+  return findBindingRangeForScopeImpl(Node, Scope, {});
+}
+
+std::vector<NixdDiagnostic> providerFailureDiagnostics(
+    const NixTU &TU, const std::vector<std::pair<std::string, std::string>> &Failures) {
+  std::vector<NixdDiagnostic> Diagnostics;
+  Diagnostics.reserve(Failures.size());
+
+  const nixf::LexerCursor Start = nixf::LexerCursor::unsafeCreate(0, 0, 0);
+  for (const auto &[Name, Error] : Failures) {
+    std::optional<nixf::LexerCursorRange> Range;
+    if (TU.ast() && TU.parentMap()) {
+      if (std::optional<std::vector<std::string>> Scope =
+              extractOptionScopeFromProviderError(Error)) {
+        Range = findBindingRangeForScope(*TU.ast(), *Scope);
+      }
+    }
+    Diagnostics.push_back(NixdDiagnostic{
+        .Range = Range.value_or(nixf::LexerCursorRange(Start)),
+        .Severity = NixdDiagnosticSeverity::Error,
+        .Code = "option-provider-eval",
+        .Source = "nixd",
+        .Message = "option provider `" + Name + "` failed to evaluate: " +
+                   Error,
+    });
+  }
+  return Diagnostics;
+}
+
 } // namespace
 
 std::vector<NixdDiagnostic>
@@ -593,8 +701,13 @@ Controller::collectOptionDiagnostics(const NixTU &TU, std::string_view File) {
   if (!IsFlakeSchema) {
     if (!waitForOptionProvidersReadyForTests())
       return Diagnostics;
-    if (!optionProvidersReadyForDiagnostics())
+    if (!optionProvidersSettledForDiagnostics())
       return Diagnostics;
+
+    std::vector<NixdDiagnostic> ProviderDiagnostics =
+        providerFailureDiagnostics(TU, optionProviderFailureSnapshot());
+    std::move(ProviderDiagnostics.begin(), ProviderDiagnostics.end(),
+              std::back_inserter(Diagnostics));
   }
 
   OptionDiagnosticContext Context;

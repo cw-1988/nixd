@@ -237,6 +237,101 @@ optionAttrPathScope(const Node &N, const ParentMapAnalysis &PM) {
   return Scope;
 }
 
+std::optional<std::vector<std::string>>
+fullOptionAttrPathScope(const Node &N, const ParentMapAnalysis &PM) {
+  using PathResult = FindAttrPathResult;
+  const auto *PathNode =
+      static_cast<const AttrPath *>(PM.upTo(N, Node::NK_AttrPath));
+  if (!PathNode || PathNode->names().empty())
+    return optionAttrPathScope(N, PM);
+
+  std::vector<std::string> Scope;
+  auto R = findAttrPathForOptions(*PathNode->names().back(), PM, Scope);
+  if (R != PathResult::OK)
+    return std::nullopt;
+  return Scope;
+}
+
+bool appendStaticBindingPath(const Binding &Bind,
+                             std::vector<std::string> &Path) {
+  for (const auto &Name : Bind.path().names()) {
+    if (!Name || !Name->isStatic())
+      return false;
+    Path.emplace_back(Name->staticName());
+  }
+  return true;
+}
+
+void collectNestedBindingScopes(const ExprAttrs &Attrs,
+                                const std::vector<std::string> &Prefix,
+                                std::vector<std::vector<std::string>> &Scopes) {
+  if (!Attrs.binds())
+    return;
+
+  std::vector<std::pair<const Binding *, std::vector<std::string>>> Level;
+  for (const std::shared_ptr<Node> &BindNode : Attrs.binds()->bindings()) {
+    if (!BindNode || BindNode->kind() != Node::NK_Binding)
+      continue;
+
+    const auto &Bind = static_cast<const Binding &>(*BindNode);
+    std::vector<std::string> Scope = Prefix;
+    if (!appendStaticBindingPath(Bind, Scope))
+      continue;
+
+    Scopes.push_back(Scope);
+    Level.emplace_back(&Bind, std::move(Scope));
+  }
+
+  for (const auto &[Bind, Scope] : Level) {
+    if (!Bind->value() || Bind->value()->kind() != Node::NK_ExprAttrs)
+      continue;
+    collectNestedBindingScopes(static_cast<const ExprAttrs &>(*Bind->value()),
+                               Scope, Scopes);
+  }
+}
+
+std::vector<std::vector<std::string>>
+namespaceBindingDescendantScopes(const Node &N, const ParentMapAnalysis &PM) {
+  using PathResult = FindAttrPathResult;
+
+  const auto *AttrNameNode =
+      static_cast<const AttrName *>(PM.upTo(N, Node::NK_AttrName));
+  if (!AttrNameNode)
+    return {};
+
+  const auto *AttrPathNode =
+      static_cast<const AttrPath *>(PM.upTo(*AttrNameNode, Node::NK_AttrPath));
+  if (!AttrPathNode || AttrPathNode->names().empty())
+    return {};
+
+  const auto *BindingNode =
+      static_cast<const Binding *>(PM.upTo(N, Node::NK_Binding));
+  if (!BindingNode || !BindingNode->value() ||
+      BindingNode->value()->kind() != Node::NK_ExprAttrs)
+    return {};
+
+  std::vector<std::string> BaseScope;
+  auto R = findAttrPathForOptions(*AttrPathNode->names().back(), PM, BaseScope);
+  if (R != PathResult::OK)
+    return {};
+
+  std::vector<std::vector<std::string>> RelativeScopes;
+  collectNestedBindingScopes(
+      static_cast<const ExprAttrs &>(*BindingNode->value()), {},
+      RelativeScopes);
+
+  std::vector<std::vector<std::string>> FullScopes;
+  FullScopes.reserve(RelativeScopes.size());
+  for (const std::vector<std::string> &Relative : RelativeScopes) {
+    std::vector<std::string> FullScope = BaseScope;
+    FullScope.insert(FullScope.end(), Relative.begin(), Relative.end());
+    if (FullScope.size() > BaseScope.size())
+      FullScopes.emplace_back(std::move(FullScope));
+  }
+
+  return FullScopes;
+}
+
 Locations defineModuleInputInspection(
     const ModuleInputInspectContext &Context, std::string_view File,
     const std::function<std::vector<ResolvedOptionField>(
@@ -395,7 +490,7 @@ void Controller::onDefinition(const TextDocumentPositionParams &Params,
         return defineFlakeInputInspection(*Context, File);
 
       auto Resolve = [&](const std::vector<std::string> &Scope) {
-        return resolveOptionInfosForFile(File, Scope);
+        return resolveDerivedOptionInfosForFile(File, Scope);
       };
       if (std::optional<ModuleInputInspectContext> Context =
               findModuleInputInspectContext(N, VLA, PM, Resolve)) {
@@ -452,8 +547,22 @@ void Controller::onDefinition(const TextDocumentPositionParams &Params,
       }
       case Node::NK_ExprAttrs:
         if (std::optional<std::vector<std::string>> Scope =
-                optionAttrPathScope(N, PM))
-          return optionDeclarationLocations(*Scope);
+                optionAttrPathScope(N, PM)) {
+          std::vector<std::string> FullScope =
+              fullOptionAttrPathScope(N, PM).value_or(*Scope);
+          if (Locations Locs =
+                  optionDefinitionLocationsForFile(File, *Scope, FullScope);
+              !Locs.empty())
+            return Locs;
+
+          for (const std::vector<std::string> &DescendantScope :
+               namespaceBindingDescendantScopes(N, PM)) {
+            if (Locations Locs = optionDefinitionLocationsForFile(
+                    File, DescendantScope, DescendantScope);
+                !Locs.empty())
+              return Locs;
+          }
+        }
         return Locations{};
       case Node::NK_ExprPath: {
         const auto &Path = static_cast<const ExprPath &>(UpExpr);

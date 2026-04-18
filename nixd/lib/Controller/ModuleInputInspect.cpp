@@ -18,7 +18,8 @@ namespace {
 
 std::optional<ModuleInputInspectContext>
 moduleInputFromDefinitionSyntax(const nixf::Node &Syntax,
-                                const nixf::ParentMapAnalysis &PM) {
+                                const nixf::ParentMapAnalysis &PM,
+                                const ModuleInputInfoResolver &Resolve) {
   const nixf::Node *LambdaNode = nullptr;
   std::string Name;
 
@@ -47,7 +48,7 @@ moduleInputFromDefinitionSyntax(const nixf::Node &Syntax,
 
   const auto &Lambda = static_cast<const nixf::ExprLambda &>(*LambdaNode);
   if (std::optional<OptionValueContext> Context =
-          findOptionValueContext(Lambda, PM, Lambda.lCur().position()))
+          findOptionValueContext(Lambda, PM, Lambda.lCur().position(), Resolve))
     return ModuleInputInspectContext{.Input = std::move(Name),
                                      .Scope = std::move(Context->Scope)};
 
@@ -330,7 +331,7 @@ findModuleInputInspectContext(const nixf::Node &N,
   };
 
   if (std::optional<ModuleInputInspectContext> Context =
-          moduleInputFromDefinitionSyntax(N, PM))
+          moduleInputFromDefinitionSyntax(N, PM, Resolve))
     return ResolveContext(std::move(*Context));
 
   const nixf::Node *ExprNode = PM.upExpr(N);
@@ -343,7 +344,7 @@ findModuleInputInspectContext(const nixf::Node &N,
     return std::nullopt;
 
   if (std::optional<ModuleInputInspectContext> Context =
-          moduleInputFromDefinitionSyntax(*Lookup.Def->syntax(), PM))
+          moduleInputFromDefinitionSyntax(*Lookup.Def->syntax(), PM, Resolve))
     return ResolveContext(std::move(*Context));
 
   return std::nullopt;

@@ -56,6 +56,14 @@ deriveTypeFromResolvedInfo(const ResolvedOptionInfo &Info,
   return option_navigation::deriveTypeFromResolvedInfo(Info, Suffix);
 }
 
+void appendDefinitionLocations(std::vector<lspserver::Location> &Locations,
+                               const OptionDescription &Desc) {
+  Locations.insert(Locations.end(), Desc.Declarations.begin(),
+                   Desc.Declarations.end());
+  Locations.insert(Locations.end(), Desc.Definitions.begin(),
+                   Desc.Definitions.end());
+}
+
 std::vector<ResolvedOptionField> fieldsFromType(std::string_view ProviderName,
                                                 const OptionType &Type,
                                                 const std::string &Prefix);
@@ -134,6 +142,55 @@ std::vector<ResolvedOptionField> fieldsFromType(std::string_view ProviderName,
   std::vector<ResolvedOptionField> Fields;
   appendFieldsFromType(Fields, ProviderName, Type, Prefix);
   return Fields;
+}
+
+std::optional<OptionDescription>
+synthesizeNamespaceDescription(const std::vector<ResolvedOptionField> &Fields) {
+  if (Fields.empty())
+    return std::nullopt;
+
+  OptionType Type;
+  Type.Name = "namespace";
+  for (const ResolvedOptionField &Entry : Fields) {
+    Type.KnownSubOptions.try_emplace(Entry.Field.Name);
+    if (!Entry.Field.Description)
+      continue;
+
+    OptionType Child;
+    bool HasChild = false;
+    if (Entry.Field.Description->Type) {
+      Child = *Entry.Field.Description->Type;
+      HasChild = true;
+    }
+    if (!Child.Description && Entry.Field.Description->Description) {
+      Child.Description = *Entry.Field.Description->Description;
+      HasChild = true;
+    }
+    if (HasChild)
+      Type.NestedTypes[Entry.Field.Name] = std::move(Child);
+  }
+
+  OptionDescription Desc;
+  Desc.Type = std::move(Type);
+  return Desc;
+}
+
+std::vector<ResolvedOptionInfo>
+synthesizeNamespaceInfos(const std::vector<ResolvedOptionField> &Fields) {
+  std::map<std::string, std::vector<ResolvedOptionField>> FieldsByProvider;
+  for (const ResolvedOptionField &Field : Fields)
+    FieldsByProvider[Field.ProviderName].push_back(Field);
+
+  std::vector<ResolvedOptionInfo> Infos;
+  Infos.reserve(FieldsByProvider.size());
+  for (auto &[ProviderName, ProviderFields] : FieldsByProvider) {
+    if (std::optional<OptionDescription> Desc =
+            synthesizeNamespaceDescription(ProviderFields)) {
+      Infos.push_back(ResolvedOptionInfo{.ProviderName = std::move(ProviderName),
+                                         .Description = std::move(*Desc)});
+    }
+  }
+  return Infos;
 }
 
 } // namespace
@@ -286,6 +343,38 @@ std::vector<ResolvedOptionInfo>
 OptionService::resolveDerived(const std::vector<OptionProviderRef> &Providers,
                               const std::vector<std::string> &Scope) {
   std::vector<ResolvedOptionInfo> Infos = resolve(Providers, Scope);
+  if (!Infos.empty()) {
+    const bool HasTypedInfo = std::any_of(Infos.begin(), Infos.end(),
+                                          [](const ResolvedOptionInfo &Info) {
+                                            return Info.Description.Type.has_value();
+                                          });
+    if (!HasTypedInfo) {
+      std::vector<ResolvedOptionInfo> NamespaceInfos =
+          synthesizeNamespaceInfos(complete(Providers, Scope, ""));
+      for (ResolvedOptionInfo &Info : Infos) {
+        if (Info.Description.Type)
+          continue;
+        auto It = std::find_if(
+            NamespaceInfos.begin(), NamespaceInfos.end(),
+            [&](const ResolvedOptionInfo &NamespaceInfo) {
+              return NamespaceInfo.ProviderName == Info.ProviderName;
+            });
+        if (It != NamespaceInfos.end())
+          Info.Description.Type = It->Description.Type;
+      }
+      for (ResolvedOptionInfo &NamespaceInfo : NamespaceInfos) {
+        const bool Present = std::any_of(
+            Infos.begin(), Infos.end(), [&](const ResolvedOptionInfo &Info) {
+              return Info.ProviderName == NamespaceInfo.ProviderName;
+            });
+        if (!Present)
+          Infos.push_back(std::move(NamespaceInfo));
+      }
+    }
+    return Infos;
+  }
+
+  Infos = synthesizeNamespaceInfos(complete(Providers, Scope, ""));
   if (!Infos.empty())
     return Infos;
 
@@ -326,26 +415,43 @@ std::vector<lspserver::Location> OptionService::declarationLocations(
   return Locations;
 }
 
-void Controller::noteOptionProviderChanged(std::string_view Name) {
+bool Controller::noteOptionProviderChanged(std::string_view Name,
+                                           std::uint64_t EvalGeneration) {
   {
     std::lock_guard _(OptionsLock);
     std::string ProviderName(Name);
+    auto EvalIt = OptionEvalGenerations.find(ProviderName);
+    if (EvalIt == OptionEvalGenerations.end() ||
+        EvalIt->second != EvalGeneration)
+      return false;
+    OptionProviderErrors.erase(ProviderName);
     ReadyOptions.insert(ProviderName);
     SettledOptions.insert(ProviderName);
     OptionGenerations[std::move(ProviderName)] = NextOptionGeneration++;
   }
   OptService.invalidateProvider(Name);
-  if (!ShuttingDown)
-    postToDiagnosticsPool([this]() { refreshDiagnostics(); });
   OptionsReadyCV.notify_all();
+  return true;
 }
 
-void Controller::noteOptionProviderSettled(std::string_view Name) {
+bool Controller::noteOptionProviderSettled(std::string_view Name,
+                                           std::uint64_t EvalGeneration,
+                                           std::optional<std::string> Error) {
   {
     std::lock_guard _(OptionsLock);
-    SettledOptions.insert(std::string(Name));
+    std::string ProviderName(Name);
+    auto EvalIt = OptionEvalGenerations.find(ProviderName);
+    if (EvalIt == OptionEvalGenerations.end() ||
+        EvalIt->second != EvalGeneration)
+      return false;
+    SettledOptions.insert(ProviderName);
+    if (Error) {
+      OptionProviderErrors[ProviderName] = std::move(*Error);
+      ReadyOptions.erase(ProviderName);
+    }
   }
   OptionsReadyCV.notify_all();
+  return Error.has_value();
 }
 
 std::vector<OptionProviderRef> Controller::optionProviderSnapshot() {
@@ -355,6 +461,8 @@ std::vector<OptionProviderRef> Controller::optionProviderSnapshot() {
   for (const auto &[Name, Provider] : Options) {
     AttrSetClient *Client = Provider ? Provider->client() : nullptr;
     if (!Client) [[unlikely]]
+      continue;
+    if (OptionProviderErrors.contains(Name))
       continue;
     auto It = OptionGenerations.find(Name);
     if (It == OptionGenerations.end())
@@ -393,12 +501,27 @@ bool Controller::waitForOptionProvidersReadyForTests() {
   OptionsReadyCV.wait(Lock, [this]() {
     return ShuttingDown || allOptionProvidersSettledLocked();
   });
-  return allOptionProvidersReadyLocked();
+  return allOptionProvidersSettledLocked();
 }
 
 bool Controller::optionProvidersReadyForDiagnostics() {
   std::lock_guard _(OptionsLock);
   return !Options.empty() && allOptionProvidersReadyLocked();
+}
+
+bool Controller::optionProvidersSettledForDiagnostics() {
+  std::lock_guard _(OptionsLock);
+  return !Options.empty() && allOptionProvidersSettledLocked();
+}
+
+std::vector<std::pair<std::string, std::string>>
+Controller::optionProviderFailureSnapshot() {
+  std::vector<std::pair<std::string, std::string>> Failures;
+  std::lock_guard _(OptionsLock);
+  Failures.reserve(OptionProviderErrors.size());
+  for (const auto &[Name, Error] : OptionProviderErrors)
+    Failures.emplace_back(Name, Error);
+  return Failures;
 }
 
 std::vector<ResolvedOptionField>
@@ -445,6 +568,46 @@ std::vector<ResolvedOptionInfo> Controller::resolveDerivedOptionInfosForFile(
   if (flake_schema::isFlakeFile(File))
     return flake_schema::resolveDerived(Scope);
   return resolveDerivedOptionInfos(Scope);
+}
+
+std::vector<lspserver::Location> Controller::optionDefinitionLocationsForFile(
+    std::string_view File, const std::vector<std::string> &Scope,
+    const std::vector<std::string> &FullScope) {
+  std::vector<lspserver::Location> Locations;
+  for (const ResolvedOptionInfo &Info : resolveOptionInfosForFile(File, Scope))
+    appendDefinitionLocations(Locations, Info.Description);
+  if (!Locations.empty())
+    return Locations;
+
+  for (size_t PrefixLen = Scope.size(); PrefixLen > 0; --PrefixLen) {
+    std::vector<std::string> ParentScope(Scope.begin(),
+                                         Scope.begin() + PrefixLen);
+    std::vector<std::string> Suffix(Scope.begin() + PrefixLen, Scope.end());
+    if (Suffix.empty())
+      continue;
+
+    for (const ResolvedOptionInfo &Info :
+         resolveOptionInfosForFile(File, ParentScope)) {
+      if (!deriveTypeFromResolvedInfo(Info, Suffix))
+        continue;
+      appendDefinitionLocations(Locations, Info.Description);
+    }
+    if (!Locations.empty())
+      return Locations;
+  }
+
+  for (size_t PrefixLen = Scope.size() + 1; PrefixLen <= FullScope.size();
+       ++PrefixLen) {
+    std::vector<std::string> DescendantScope(FullScope.begin(),
+                                             FullScope.begin() + PrefixLen);
+    for (const ResolvedOptionInfo &Info :
+         resolveOptionInfosForFile(File, DescendantScope))
+      appendDefinitionLocations(Locations, Info.Description);
+    if (!Locations.empty())
+      return Locations;
+  }
+
+  return Locations;
 }
 
 std::vector<lspserver::Location>

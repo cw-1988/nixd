@@ -1,6 +1,7 @@
 #include "nixd/Controller/Option.h"
 #include "Controller/AST.h"
 #include "Integer.h"
+#include "Navigation.h"
 
 #include <nixf/Basic/Nodes/Attrs.h>
 #include <nixf/Basic/Nodes/Lambda.h>
@@ -158,6 +159,133 @@ bool isPrefixOrEqual(const std::vector<std::string> &Prefix,
          std::equal(Prefix.begin(), Prefix.end(), Scope.begin());
 }
 
+option_navigation::ChildStep
+toNavigationStep(const OptionValueChildStep &Step) {
+  using NavKind = option_navigation::ChildKind;
+  switch (Step.Kind) {
+  case OptionValueChildKind::ListElement:
+    return option_navigation::ChildStep{.Kind = NavKind::ListElement};
+  case OptionValueChildKind::AttrValue:
+    return option_navigation::ChildStep{
+        .Kind = NavKind::AttrValue, .Name = Step.Name};
+  case OptionValueChildKind::FunctionBody:
+    return option_navigation::ChildStep{.Kind = NavKind::FunctionBody};
+  }
+  return option_navigation::ChildStep{.Kind = NavKind::AttrValue};
+}
+
+bool permitsUnknownLeaf(const std::vector<OptionType> &Current,
+                        const OptionValueChildStep &Step) {
+  if (Step.Kind != OptionValueChildKind::AttrValue)
+    return false;
+  return std::any_of(Current.begin(), Current.end(), [](const OptionType &Type) {
+    return !option_navigation::hasDynamicAttrCoverage(Type);
+  });
+}
+
+bool pathPermittedByTypes(std::vector<OptionType> Current,
+                          const std::vector<OptionValueChildStep> &Path,
+                          bool AllowUnknownLeaf) {
+  if (Current.empty())
+    return false;
+
+  for (size_t I = 0; I < Path.size(); ++I) {
+    const OptionValueChildStep &Step = Path[I];
+    std::vector<OptionType> Next;
+    for (const OptionType &Candidate : Current) {
+      std::vector<OptionType> Nested =
+          option_navigation::childTypesForStep(Candidate, toNavigationStep(Step));
+      Next.insert(Next.end(), std::make_move_iterator(Nested.begin()),
+                  std::make_move_iterator(Nested.end()));
+    }
+    if (Next.empty()) {
+      if (AllowUnknownLeaf && I + 1 == Path.size() &&
+          permitsUnknownLeaf(Current, Step))
+        return true;
+      return false;
+    }
+    Current = std::move(Next);
+  }
+
+  return true;
+}
+
+bool pathPermittedByInfos(const std::vector<ResolvedOptionInfo> &Infos,
+                          const std::vector<OptionValueChildStep> &Path,
+                          bool AllowUnknownLeaf) {
+  std::vector<OptionType> Current;
+  for (const ResolvedOptionInfo &Info : Infos) {
+    if (Info.Description.Type)
+      Current.emplace_back(*Info.Description.Type);
+  }
+  return pathPermittedByTypes(std::move(Current), Path, AllowUnknownLeaf);
+}
+
+bool scopeSemanticallyAllowed(const std::vector<std::string> &Scope,
+                              const OptionInfoResolver &Resolve) {
+  if (!Resolve(Scope).empty())
+    return true;
+  if (Scope.size() < 2)
+    return false;
+
+  for (size_t PrefixLen = Scope.size() - 1; PrefixLen > 0; --PrefixLen) {
+    std::vector<OptionValueChildStep> Suffix;
+    Suffix.reserve(Scope.size() - PrefixLen);
+    for (size_t I = PrefixLen; I < Scope.size(); ++I) {
+      Suffix.push_back(OptionValueChildStep{
+          .Kind = OptionValueChildKind::AttrValue, .Name = Scope[I]});
+    }
+
+    if (pathPermittedByInfos(
+            Resolve(std::vector<std::string>(Scope.begin(),
+                                             Scope.begin() + PrefixLen)),
+            Suffix, true))
+      return true;
+  }
+
+  return false;
+}
+
+std::vector<OptionValueChildStep>
+valuePathFromDesc(const Node &Desc, const Binding &OuterBinding,
+                  const ParentMapAnalysis &PM) {
+  std::vector<OptionValueChildStep> ReversedPath;
+  const Node *Current = &Desc;
+  const Expr *OuterValue = OuterBinding.value().get();
+  while (Current && Current != OuterValue) {
+    if (PM.isRoot(*Current))
+      break;
+    const Node *Parent = PM.query(*Current);
+    if (!Parent)
+      break;
+
+    if (Parent->kind() == Node::NK_ExprList &&
+        isListElementChild(static_cast<const ExprList &>(*Parent), *Current)) {
+      ReversedPath.push_back(
+          OptionValueChildStep{.Kind = OptionValueChildKind::ListElement});
+    } else if (Parent->kind() == Node::NK_Binding &&
+               Parent != &OuterBinding &&
+               static_cast<const Binding *>(Parent)->value().get() == Current) {
+      if (std::optional<std::vector<std::string>> Path =
+              staticBindingPath(static_cast<const Binding &>(*Parent))) {
+        for (auto It = Path->rbegin(); It != Path->rend(); ++It) {
+          ReversedPath.push_back(OptionValueChildStep{
+              .Kind = OptionValueChildKind::AttrValue, .Name = *It});
+        }
+      }
+    } else if (Parent->kind() == Node::NK_ExprLambda &&
+               static_cast<const ExprLambda *>(Parent)->body() == Current) {
+      ReversedPath.push_back(
+          OptionValueChildStep{.Kind = OptionValueChildKind::FunctionBody});
+    }
+
+    Current = Parent;
+  }
+
+  std::reverse(ReversedPath.begin(), ReversedPath.end());
+  return ReversedPath;
+}
+
 struct OptionBindingContext {
   const Binding *Bind = nullptr;
   std::vector<std::string> Scope;
@@ -165,7 +293,7 @@ struct OptionBindingContext {
 
 std::optional<OptionBindingContext>
 findOptionValueBinding(const Node &Desc, const ParentMapAnalysis &PM,
-                       Position Pos) {
+                       Position Pos, const OptionInfoResolver &Resolve) {
   const Node *BindingNode = PM.upTo(Desc, Node::NK_Binding);
   std::unordered_set<const Node *> Seen;
   std::optional<OptionBindingContext> Selected;
@@ -174,14 +302,14 @@ findOptionValueBinding(const Node &Desc, const ParentMapAnalysis &PM,
     const auto &Binding = static_cast<const nixf::Binding &>(*BindingNode);
     if (Binding.eq() && !(Pos < Binding.eq()->rCur().position()) &&
         (!Binding.value() || !(Binding.value()->rCur().position() < Pos))) {
-      if (std::optional<std::vector<std::string>> Scope =
-              findOptionBindingScope(Binding, PM)) {
+      if (std::optional<SemanticOptionBinding> Semantic =
+              findSemanticOptionBinding(Binding, PM, Resolve)) {
         if (!Selected) {
           Selected = OptionBindingContext{.Bind = &Binding,
-                                          .Scope = std::move(*Scope)};
-        } else if (!isPrefixOrEqual(*Scope, Selected->Scope)) {
+                                          .Scope = std::move(Semantic->Scope)};
+        } else if (!isPrefixOrEqual(Semantic->Scope, Selected->Scope)) {
           Selected = OptionBindingContext{.Bind = &Binding,
-                                          .Scope = std::move(*Scope)};
+                                          .Scope = std::move(Semantic->Scope)};
         } else {
           break;
         }
@@ -338,54 +466,69 @@ nixd::findOptionBindingScope(const Binding &Binding,
   return Scope;
 }
 
+namespace {
+
+std::optional<SemanticOptionBinding> findSemanticOptionBindingImpl(
+    const Binding &Bind, const ParentMapAnalysis &PM,
+    const OptionInfoResolver &Resolve, std::unordered_set<const Node *> &Active) {
+  if (!Active.insert(&Bind).second)
+    return std::nullopt;
+  struct ActiveGuard {
+    std::unordered_set<const Node *> &Active;
+    const Node *Target;
+    ~ActiveGuard() { Active.erase(Target); }
+  } Guard{Active, &Bind};
+
+  std::optional<std::vector<std::string>> Scope = findOptionBindingScope(Bind, PM);
+  if (!Scope || Scope->empty())
+    return std::nullopt;
+  if (scopeSemanticallyAllowed(*Scope, Resolve))
+    return SemanticOptionBinding{.Binding = &Bind, .Scope = std::move(*Scope)};
+
+  if (!Bind.value())
+    return std::nullopt;
+
+  const Node *OuterNode = enclosingBindingNode(Bind, PM);
+  while (OuterNode) {
+    const auto &OuterBinding = static_cast<const nixf::Binding &>(*OuterNode);
+    if (std::optional<SemanticOptionBinding> Outer =
+            findSemanticOptionBindingImpl(OuterBinding, PM, Resolve, Active)) {
+      std::vector<OptionValueChildStep> Path =
+          valuePathFromDesc(*Bind.value(), *Outer->Binding, PM);
+      if (pathPermittedByInfos(Resolve(Outer->Scope), Path, true))
+        return SemanticOptionBinding{
+            .Binding = &Bind, .Scope = std::move(*Scope)};
+    }
+    OuterNode = enclosingBindingNode(OuterBinding, PM);
+  }
+
+  return std::nullopt;
+}
+
+} // namespace
+
+std::optional<SemanticOptionBinding>
+nixd::findSemanticOptionBinding(const Binding &Binding,
+                                const ParentMapAnalysis &PM,
+                                const OptionInfoResolver &Resolve) {
+  std::unordered_set<const Node *> Active;
+  return findSemanticOptionBindingImpl(Binding, PM, Resolve, Active);
+}
+
 std::optional<OptionValueContext>
 nixd::findOptionValueContext(const Node &Desc, const ParentMapAnalysis &PM,
-                             Position Pos) {
+                             Position Pos,
+                             const OptionInfoResolver &Resolve) {
   std::optional<OptionBindingContext> BindingContext =
-      findOptionValueBinding(Desc, PM, Pos);
+      findOptionValueBinding(Desc, PM, Pos, Resolve);
   if (!BindingContext)
     return std::nullopt;
 
   const Binding &OuterBinding = *BindingContext->Bind;
-  const Node *BindingNode = BindingContext->Bind;
-  std::vector<OptionValueChildStep> ReversedPath;
   const Expr *CompletionExpr = static_cast<const Expr *>(PM.upExpr(Desc));
-  const Node *Current = &Desc;
-  const Expr *OuterValue = OuterBinding.value().get();
-  while (Current && Current != OuterValue) {
-    if (PM.isRoot(*Current))
-      break;
-    const Node *Parent = PM.query(*Current);
-    if (!Parent)
-      break;
-
-    if (Parent->kind() == Node::NK_ExprList &&
-        isListElementChild(static_cast<const ExprList &>(*Parent), *Current)) {
-      ReversedPath.push_back(
-          OptionValueChildStep{.Kind = OptionValueChildKind::ListElement});
-    } else if (Parent->kind() == Node::NK_Binding &&
-               Parent != BindingNode &&
-               static_cast<const Binding *>(Parent)->value().get() ==
-                   Current) {
-      if (std::optional<std::vector<std::string>> Path =
-              staticBindingPath(static_cast<const Binding &>(*Parent))) {
-        for (auto It = Path->rbegin(); It != Path->rend(); ++It)
-          ReversedPath.push_back(OptionValueChildStep{
-              .Kind = OptionValueChildKind::AttrValue, .Name = *It});
-      }
-    } else if (Parent->kind() == Node::NK_ExprLambda &&
-               static_cast<const ExprLambda *>(Parent)->body() == Current) {
-      ReversedPath.push_back(
-          OptionValueChildStep{.Kind = OptionValueChildKind::FunctionBody});
-    }
-
-    Current = Parent;
-  }
-
-  std::reverse(ReversedPath.begin(), ReversedPath.end());
   return OptionValueContext{.Binding = &OuterBinding,
                             .CompletionExpr = CompletionExpr,
                             .Pos = Pos,
                             .Scope = std::move(BindingContext->Scope),
-                            .ValuePath = std::move(ReversedPath)};
+                            .ValuePath = valuePathFromDesc(Desc, OuterBinding, PM)};
 }
