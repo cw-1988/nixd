@@ -10,6 +10,8 @@
 #include <llvm/ADT/ArrayRef.h>
 #include <llvm/Support/CommandLine.h>
 
+#include <csignal>
+
 using namespace lspserver;
 using namespace nixd;
 
@@ -50,6 +52,7 @@ int MainExecutablePathAnchor;
 } // namespace
 
 int main(int argc, char *argv[]) {
+  std::signal(SIGPIPE, SIG_IGN);
   AttrSetClient::setMainExecutablePath(argv[0], &MainExecutablePathAnchor);
 
   SetVersionPrinter([](llvm::raw_ostream &OS) {
