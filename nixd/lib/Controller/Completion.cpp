@@ -209,20 +209,22 @@ void Controller::onCompletion(const CompletionParams &Params,
             }
           }
 
-          if (std::optional<EnclosingOptionAttrSet> Context =
-                  enclosingOptionAttrSetScope(*AST, TU->src(), Pos, PM,
-                                              Resolve)) {
-            std::vector<std::string> Scope = Context->Scope;
-            if (InFlakeOutputsBody)
-              Scope = flake_schema::outputsBodyScope(Scope);
-            if (OptionsReady)
-              completion::completeOptionNames(
-                  filterUsedOptionNames(
-                      completeDerivedOptionsForFile(File, Scope, ""),
-                      usedOptionNames(*Context->Attrs)),
-                  ClientCaps.CompletionSnippets, List.items);
-            if (!List.items.empty())
-              return List;
+          if (!UpExpr || UpExpr->kind() == Node::NK_ExprAttrs) {
+            if (std::optional<EnclosingOptionAttrSet> Context =
+                    enclosingOptionAttrSetScope(*AST, TU->src(), Pos, PM,
+                                                Resolve)) {
+              std::vector<std::string> Scope = Context->Scope;
+              if (InFlakeOutputsBody)
+                Scope = flake_schema::outputsBodyScope(Scope);
+              if (OptionsReady)
+                completion::completeOptionNames(
+                    filterUsedOptionNames(
+                        completeDerivedOptionsForFile(File, Scope, ""),
+                        usedOptionNames(*Context->Attrs)),
+                    ClientCaps.CompletionSnippets, List.items);
+              if (!List.items.empty())
+                return List;
+            }
           }
 
           if (std::optional<OptionValueContext> Context =
