@@ -147,6 +147,17 @@ CHECK: "code": "flake-output-input-unknown"
 CHECK: "message": "flake output input `nixpkgs` is not provided by `self` or `inputs`; available inputs: `self`, `nipkgs`"
 ```
 
+<-- nixd/waitForOptionsSettled(999)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 999,
+  "method": "nixd/waitForOptionsSettled",
+  "params": null
+}
+```
+
 ```json
 {"jsonrpc":"2.0","method":"exit"}
 ```

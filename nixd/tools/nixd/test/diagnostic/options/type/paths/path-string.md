@@ -60,6 +60,17 @@ CHECK: "message": "value for option `services.k3s.payloadPathLiteral` has type `
 CHECK: "message": "value for option `services.k3s.payloadAbsoluteString` has type `string`, expected `path path`"
 ```
 
+<-- nixd/waitForOptionsSettled(999)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 999,
+  "method": "nixd/waitForOptionsSettled",
+  "params": null
+}
+```
+
 ```json
 {"jsonrpc":"2.0","method":"exit"}
 ```

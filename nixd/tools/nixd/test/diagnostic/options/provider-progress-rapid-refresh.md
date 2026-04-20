@@ -3,6 +3,4 @@
 ```
 CHECK: "title": "evaluating nixos"
 CHECK: "message": "evaluated nixos"
-CHECK: "title": "evaluating nixos"
-CHECK: "message": "evaluated nixos"
 ```

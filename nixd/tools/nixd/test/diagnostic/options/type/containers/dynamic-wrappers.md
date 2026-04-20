@@ -86,6 +86,17 @@ CHECK-NOT: unknown option `services.example.nullFree.arbitrary.deep`
 CHECK-NOT: unknown option `services.example.uniqueAttrs.anything.deep`
 ```
 
+<-- nixd/waitForOptionsSettled(999)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 999,
+  "method": "nixd/waitForOptionsSettled",
+  "params": null
+}
+```
+
 ```json
 {"jsonrpc":"2.0","method":"exit"}
 ```

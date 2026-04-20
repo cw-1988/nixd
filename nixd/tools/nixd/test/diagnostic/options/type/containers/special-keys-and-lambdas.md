@@ -109,6 +109,17 @@ CHECK-DAG: "message": "unknown option `services.example.lambdaModule.mystery`"
 CHECK-DAG: "message": "value for option `services.example.fnElem.<return>` has type `string`, expected `int signed integer`"
 ```
 
+<-- nixd/waitForOptionsSettled(999)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 999,
+  "method": "nixd/waitForOptionsSettled",
+  "params": null
+}
+```
+
 ```json
 {"jsonrpc":"2.0","method":"exit"}
 ```

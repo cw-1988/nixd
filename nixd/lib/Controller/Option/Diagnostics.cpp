@@ -795,6 +795,12 @@ Controller::collectOptionDiagnostics(const NixTU &TU, std::string_view File) {
 
     std::vector<OptionProviderFailure> Failures =
         optionProviderFailureSnapshot();
+    std::erase_if(Failures, [&](const OptionProviderFailure &Failure) {
+      if (!Failure.Location || locationMatchesFile(*Failure.Location, File))
+        return false;
+      std::lock_guard _(TUsLock);
+      return TUs.contains(Failure.Location->uri.file());
+    });
     std::vector<NixdDiagnostic> ProviderDiagnostics =
         providerFailureDiagnostics(TU, File, TU.src(), Failures);
     std::move(ProviderDiagnostics.begin(), ProviderDiagnostics.end(),

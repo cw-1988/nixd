@@ -80,6 +80,17 @@
 CHECK: "message": "unknown option `services.example.moduleAsLambda.mystery`"
 ```
 
+<-- nixd/waitForOptionsSettled(999)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 999,
+  "method": "nixd/waitForOptionsSettled",
+  "params": null
+}
+```
+
 ```json
 {"jsonrpc":"2.0","method":"exit"}
 ```

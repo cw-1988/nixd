@@ -60,6 +60,17 @@ CHECK-NOT: required option `services.example.requiredPolicy.missingRequired`
 CHECK-NOT: value for option `services.example.pattern`
 ```
 
+<-- nixd/waitForOptionsSettled(999)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 999,
+  "method": "nixd/waitForOptionsSettled",
+  "params": null
+}
+```
+
 ```json
 {"jsonrpc":"2.0","method":"exit"}
 ```

@@ -170,6 +170,8 @@ Controller::Controller(std::unique_ptr<lspserver::InboundPort> In,
   Registry.addMethod("textDocument/rename", this, &Controller::onRename);
   Registry.addMethod("textDocument/prepareRename", this,
                      &Controller::onPrepareRename);
+  Registry.addMethod("nixd/waitForOptionsSettled", this,
+                     &Controller::onWaitForOptionsSettled);
 
   // Workspace features
   Registry.addNotification("workspace/didChangeConfiguration", this,

@@ -58,6 +58,17 @@ CHECK-NOT: value for option `services.example.computedTimeout`
 CHECK-NOT: value for option `services.example.calculatedTimeout`
 ```
 
+<-- nixd/waitForOptionsSettled(999)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 999,
+  "method": "nixd/waitForOptionsSettled",
+  "params": null
+}
+```
+
 ```json
 {"jsonrpc":"2.0","method":"exit"}
 ```

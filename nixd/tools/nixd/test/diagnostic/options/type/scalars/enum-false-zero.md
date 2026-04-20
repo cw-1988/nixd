@@ -38,6 +38,17 @@ CHECK-DAG: "message": "value for option `services.example.zeroBad` has type `int
 CHECK-DAG: "message": "value for option `services.example.falseBad` has type `boolean`, expected `enum false`"
 ```
 
+<-- nixd/waitForOptionsSettled(999)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 999,
+  "method": "nixd/waitForOptionsSettled",
+  "params": null
+}
+```
+
 ```json
 {"jsonrpc":"2.0","method":"exit"}
 ```

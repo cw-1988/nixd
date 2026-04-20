@@ -81,6 +81,17 @@ CHECK-DAG: "message": "value for option `services.example.coerced` has type `boo
 CHECK-NOT: value for option `services.example.ports[]` has type `integer`
 ```
 
+<-- nixd/waitForOptionsSettled(999)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 999,
+  "method": "nixd/waitForOptionsSettled",
+  "params": null
+}
+```
+
 ```json
 {"jsonrpc":"2.0","method":"exit"}
 ```

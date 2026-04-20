@@ -95,6 +95,17 @@ CHECK-NOT: unknown option `services.example.eitherListValue.bad`
 CHECK-NOT: unknown option `imports`
 ```
 
+<-- nixd/waitForOptionsSettled(999)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 999,
+  "method": "nixd/waitForOptionsSettled",
+  "params": null
+}
+```
+
 ```json
 {"jsonrpc":"2.0","method":"exit"}
 ```

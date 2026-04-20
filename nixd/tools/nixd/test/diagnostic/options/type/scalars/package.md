@@ -46,6 +46,17 @@ CHECK-DAG: "message": "value for option `services.example.pkgBadBool` has type `
 CHECK-DAG: "message": "value for option `services.example.pkgBadList` has type `list`, expected `package package`"
 ```
 
+<-- nixd/waitForOptionsSettled(999)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 999,
+  "method": "nixd/waitForOptionsSettled",
+  "params": null
+}
+```
+
 ```json
 {"jsonrpc":"2.0","method":"exit"}
 ```

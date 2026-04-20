@@ -51,6 +51,17 @@ CHECK-NOT: value for option `services.example.literalPatternGood`
 CHECK: "message": "value for option `services.example.literalPatternBad` has type `string`, expected `strMatching string matching abc`"
 ```
 
+<-- nixd/waitForOptionsSettled(999)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 999,
+  "method": "nixd/waitForOptionsSettled",
+  "params": null
+}
+```
+
 ```json
 {"jsonrpc":"2.0","method":"exit"}
 ```

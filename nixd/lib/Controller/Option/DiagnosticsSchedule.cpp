@@ -53,3 +53,12 @@ void Controller::refreshDiagnostics() {
                        TU->nixdDiagnostics());
   }
 }
+
+void Controller::onWaitForOptionsSettled(const llvm::json::Value &,
+                                         lspserver::Callback<llvm::json::Value>
+                                             Reply) {
+  waitForOptionProvidersReadyForTests();
+  waitForPoolTasks();
+  refreshDiagnostics();
+  Reply(nullptr);
+}

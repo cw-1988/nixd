@@ -35,6 +35,17 @@ CHECK: "message": "value for option `services.k3s.charts.badString` has type `st
 CHECK: "message": "value for option `services.k3s.charts.badBool` has type `boolean`, expected `path absolute path`"
 ```
 
+<-- nixd/waitForOptionsSettled(999)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 999,
+  "method": "nixd/waitForOptionsSettled",
+  "params": null
+}
+```
+
 ```json
 {"jsonrpc":"2.0","method":"exit"}
 ```

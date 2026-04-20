@@ -346,6 +346,8 @@ private:
                                  std::optional<int64_t> Version,
                                  std::shared_ptr<NixTU> TU);
   void refreshDiagnostics();
+  void onWaitForOptionsSettled(const llvm::json::Value &Params,
+                               lspserver::Callback<llvm::json::Value> Reply);
   void
   publishDiagnostics(lspserver::PathRef File, std::optional<int64_t> Version,
                      std::string_view Src,
