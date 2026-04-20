@@ -13,6 +13,9 @@ struct PipedProc {
   AutoCloseFD Stdin;
   AutoCloseFD Stdout;
   AutoCloseFD Stderr;
+
+  ~PipedProc();
+  bool running();
 };
 
 } // namespace nixd::util

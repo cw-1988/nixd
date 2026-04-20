@@ -75,6 +75,7 @@ libnixd_lib = library(
     'Support/AutoRemoveShm.cpp',
     'Support/ForkPiped.cpp',
     'Support/JSON.cpp',
+    'Support/PipedProc.cpp',
     'Support/StreamProc.cpp',
     dependencies: libnixd_deps,
     include_directories: libnixd_include,

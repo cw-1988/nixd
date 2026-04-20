@@ -24,6 +24,7 @@ public:
   ~AutoCloseFD();
 
   [[nodiscard]] FDTy get() const;
+  void close();
   void release();
 };
 

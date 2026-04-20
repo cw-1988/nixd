@@ -6,7 +6,7 @@ namespace nixd::util {
 
 AutoCloseFD::~AutoCloseFD() {
   if (FD != ReleasedFD) [[likely]]
-    close(FD);
+    ::close(FD);
 }
 
 AutoCloseFD::AutoCloseFD(AutoCloseFD &&That) noexcept : FD(That.get()) {
@@ -14,6 +14,13 @@ AutoCloseFD::AutoCloseFD(AutoCloseFD &&That) noexcept : FD(That.get()) {
 }
 
 AutoCloseFD::FDTy AutoCloseFD::get() const { return FD; }
+
+void AutoCloseFD::close() {
+  if (FD != ReleasedFD) {
+    ::close(FD);
+    release();
+  }
+}
 
 void AutoCloseFD::release() { FD = ReleasedFD; }
 
