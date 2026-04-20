@@ -59,7 +59,7 @@ AttrSetClientProc::AttrSetClientProc(const std::function<int()> &Action)
       Input([this]() { Client.run(); }) {}
 
 AttrSetClient *AttrSetClientProc::client() {
-  if (!kill(Proc.proc().PID, 0))
+  if (!Client.connectionClosed() && Proc.proc().running())
     return &Client;
   return nullptr;
 }

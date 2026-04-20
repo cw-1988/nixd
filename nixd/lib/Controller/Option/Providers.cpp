@@ -469,6 +469,7 @@ std::vector<OptionProviderRef> Controller::optionProviderSnapshot() {
       It = OptionGenerations.emplace(Name, NextOptionGeneration++).first;
     Providers.push_back(OptionProviderRef{
         .Name = Name,
+        .Worker = Provider,
         .Client = Client,
         .Generation = It->second,
     });

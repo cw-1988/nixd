@@ -29,13 +29,13 @@ namespace nixd {
 
 class Controller : public lspserver::LSPServer {
 public:
-  using OptionMapTy = std::map<std::string, std::unique_ptr<AttrSetClientProc>>;
+  using OptionMapTy = std::map<std::string, std::shared_ptr<AttrSetClientProc>>;
 
 private:
   std::unique_ptr<OwnedEvalClient> Eval;
 
   // Use this worker for evaluating nixpkgs.
-  std::unique_ptr<AttrSetClientProc> NixpkgsEval;
+  std::shared_ptr<AttrSetClientProc> NixpkgsEval;
   std::atomic<bool> ShuttingDown = false;
 
   std::mutex OptionsLock;
@@ -103,7 +103,10 @@ private:
   /// \brief Get configuration from LSP client. Update the config.
   void fetchConfig();
   void enqueueOptionProviderReevaluation(bool RestartWorkers = false);
-  void reevaluateOptionProviders(bool RestartWorkers = false);
+  void processOptionProviderReevaluationQueue();
+  void reevaluateOptionProviders(bool RestartWorkers = false,
+                                 llvm::unique_function<void()> OnDone =
+                                     nullptr);
   void noteOptionProviderFileSaved(lspserver::PathRef File);
   void reevaluateOptionProvidersForFileChange(lspserver::PathRef File);
 

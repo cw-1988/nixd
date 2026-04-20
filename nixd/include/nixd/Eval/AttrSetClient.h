@@ -84,9 +84,11 @@ public:
   /// \returns nullptr if it has been dead.
   AttrSetClient *client();
   ~AttrSetClientProc() {
-    Client.exit();
+    if (!Client.connectionClosed() && Proc.proc().running())
+      Client.exit();
     Client.closeInbound();
-    Input.join();
+    if (Input.joinable())
+      Input.join();
   }
 
   /// \see StreamProc::StreamProc

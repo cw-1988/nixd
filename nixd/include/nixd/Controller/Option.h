@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -17,6 +18,7 @@
 namespace nixd {
 
 class AttrSetClient;
+class AttrSetClientProc;
 
 enum class OptionLiteralKind : std::uint8_t {
   Unknown,
@@ -81,6 +83,8 @@ struct OptionValueContext {
 
 struct OptionProviderRef {
   std::string Name;
+  // Keeps Client alive while a file-watch refresh swaps the provider map.
+  std::shared_ptr<AttrSetClientProc> Worker;
   AttrSetClient *Client = nullptr;
   std::uint64_t Generation = 0;
 };
