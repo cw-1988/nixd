@@ -10,7 +10,10 @@ config.test_format = lit.formats.ShTest()
 
 test_root = os.path.dirname(__file__)
 
-build_dir = os.getenv("MESON_BUILD_ROOT", default="/dev/null")
+build_dir = os.path.abspath(os.getenv("MESON_BUILD_ROOT", default="/dev/null"))
+tools_dir = os.path.join(build_dir, "nixd", "tools")
+if os.path.isdir(tools_dir):
+    config.environment["PATH"] = tools_dir + os.pathsep + config.environment["PATH"]
 
 attrset_eval = os.getenv("NIXD_ATTRSET_EVAL")
 if attrset_eval is not None:

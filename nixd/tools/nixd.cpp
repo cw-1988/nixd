@@ -5,6 +5,7 @@
 
 #include "nixd/CommandLine/Options.h"
 #include "nixd/Controller/Controller.h"
+#include "nixd/Eval/AttrSetClient.h"
 
 #include <llvm/ADT/ArrayRef.h>
 #include <llvm/Support/CommandLine.h>
@@ -44,9 +45,13 @@ opt<Logger::Level> LogLevel{
 opt<bool> PrettyPrint{"pretty", desc("Pretty-print JSON output"), init(false),
                       cat(Debug)};
 
+int MainExecutablePathAnchor;
+
 } // namespace
 
 int main(int argc, char *argv[]) {
+  AttrSetClient::setMainExecutablePath(argv[0], &MainExecutablePathAnchor);
+
   SetVersionPrinter([](llvm::raw_ostream &OS) {
     OS << "nixd, version: ";
 #ifdef NIXD_VCS_TAG

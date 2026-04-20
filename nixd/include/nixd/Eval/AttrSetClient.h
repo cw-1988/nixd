@@ -70,6 +70,8 @@ public:
   /// Get executable path for launching the server.
   /// \returns null terminated string.
   static const char *getExe();
+
+  static void setMainExecutablePath(const char *Argv0, void *MainAddr);
 };
 
 class AttrSetClientProc {
