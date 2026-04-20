@@ -10,13 +10,20 @@
   services.nixdLab.storeThing = "/etc";
   services.nixdLab.absolutePath = ./payloads/service.json;
   services.nixdLab.listenPort = "not-a-port";
-  services.nixdLab.launchOrder = [ "database" "sidecar" ];
+  services.nixdLab.launchOrder = [
+    "database"
+    "sidecar"
+  ];
   services.nixdLab.featureFlags.rollout = "yes";
   services.nixdLab.enumByHost.control = "reckless";
   services.nixdLab.workers.api.role = "frontend";
   services.nixdLab.workers.api.replicas = 0;
-  services.nixdLab.workers.api.routes = { path = "/bad"; };
-  services.nixdLab.matrix = { not = "a-list"; };
+  services.nixdLab.workers.api.routes = {
+    path = "/bad";
+  };
+  services.nixdLab.matrix = {
+    not = "a-list";
+  };
   services.nixdLab.objectMatrix.bad.weight = 200;
   services.nixdLab.nested.mystery = 1;
   services.nixdLab.openSettings.known = "wrong";
