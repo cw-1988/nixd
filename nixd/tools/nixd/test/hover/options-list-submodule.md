@@ -57,7 +57,7 @@
 ```
 CHECK:      "id": 1,
 CHECK:      "kind": "markdown",
-CHECK:      "value": "\"type\": `listOf` - list of submodule  \n\"description\": Plain list of submodules."
+CHECK:      "value": "**Type** `listOf` - list of submodule  \n**Description** Plain list of submodules."
 ```
 
 ```json

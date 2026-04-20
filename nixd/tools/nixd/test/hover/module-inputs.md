@@ -161,7 +161,7 @@ CHECK-SAME: - `customTop` (`_module.args`)
 CHECK-SAME: - `modulesPath` (`specialArgs`)
 CHECK-SAME: - `pkgs` (`_module.args`)
 CHECK:      "id": 3,
-CHECK:      "value": "## Module Input\n\n`config`\n\nProvided by: `module system`.\n\n\"type\": `submodule` - submodule"
+CHECK:      "value": "## Module Input\n\n`config`\n\nProvided by: `module system`.\n\n**Type** `submodule` - submodule"
 CHECK:      "id": 4,
 CHECK:      "value": "## Additional Module Inputs\n\n`...` keeps this lambda open to module arguments that are not listed explicitly.
 CHECK-SAME: - `name` (`_module.args`)

@@ -51,7 +51,7 @@
 ```
 CHECK:      "id": 1,
 CHECK:      "kind": "markdown",
-CHECK:      "value": "\"type\": `namespace`"
+CHECK:      "value": "**Type** `namespace`"
 ```
 
 <-- textDocument/hover(2)
@@ -75,7 +75,7 @@ CHECK:      "value": "\"type\": `namespace`"
 
 ```
 CHECK:      "id": 2,
-CHECK:      "value": "\"type\": `attrsOf` - attribute set of submodule  \n\"description\": User accounts."
+CHECK:      "value": "**Type** `attrsOf` - attribute set of submodule  \n**Description** User accounts."
 ```
 
 <-- textDocument/hover(3)
@@ -99,7 +99,7 @@ CHECK:      "value": "\"type\": `attrsOf` - attribute set of submodule  \n\"desc
 
 ```
 CHECK:      "id": 3,
-CHECK:      "value": "\"type\": `namespace`"
+CHECK:      "value": "**Type** `namespace`"
 ```
 
 <-- textDocument/hover(4)
@@ -123,7 +123,7 @@ CHECK:      "value": "\"type\": `namespace`"
 
 ```
 CHECK:      "id": 4,
-CHECK:      "value": "\"type\": `namespace`"
+CHECK:      "value": "**Type** `namespace`"
 ```
 
 <-- textDocument/hover(5)
@@ -147,7 +147,7 @@ CHECK:      "value": "\"type\": `namespace`"
 
 ```
 CHECK:      "id": 5,
-CHECK:      "value": "\"type\": `namespace`"
+CHECK:      "value": "**Type** `namespace`"
 ```
 
 <-- textDocument/hover(6)
@@ -171,7 +171,7 @@ CHECK:      "value": "\"type\": `namespace`"
 
 ```
 CHECK:      "id": 6,
-CHECK:      "value": "\"type\": `listOf` - list of string"
+CHECK:      "value": "**Type** `listOf` - list of string"
 ```
 
 ```json
