@@ -436,7 +436,7 @@ bool Controller::noteOptionProviderChanged(std::string_view Name,
 
 bool Controller::noteOptionProviderSettled(std::string_view Name,
                                            std::uint64_t EvalGeneration,
-                                           std::optional<std::string> Error) {
+                                           std::optional<EvalExprError> Error) {
   {
     std::lock_guard _(OptionsLock);
     std::string ProviderName(Name);
@@ -514,13 +514,17 @@ bool Controller::optionProvidersSettledForDiagnostics() {
   return !Options.empty() && allOptionProvidersSettledLocked();
 }
 
-std::vector<std::pair<std::string, std::string>>
+std::vector<OptionProviderFailure>
 Controller::optionProviderFailureSnapshot() {
-  std::vector<std::pair<std::string, std::string>> Failures;
+  std::vector<OptionProviderFailure> Failures;
   std::lock_guard _(OptionsLock);
   Failures.reserve(OptionProviderErrors.size());
   for (const auto &[Name, Error] : OptionProviderErrors)
-    Failures.emplace_back(Name, Error);
+    Failures.push_back(OptionProviderFailure{
+        .ProviderName = Name,
+        .Message = Error.Message,
+        .Location = Error.Location,
+    });
   return Failures;
 }
 

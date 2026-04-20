@@ -85,6 +85,12 @@ struct OptionProviderRef {
   std::uint64_t Generation = 0;
 };
 
+struct OptionProviderFailure {
+  std::string ProviderName;
+  std::string Message;
+  std::optional<lspserver::Location> Location;
+};
+
 struct ResolvedOptionInfo {
   std::string ProviderName;
   OptionDescription Description;

@@ -54,7 +54,7 @@ private:
   std::map<std::string, std::uint64_t>
       OptionEvalGenerations;                   // GUARDED_BY(OptionsLock)
   std::uint64_t NextOptionEvalGeneration = 1; // GUARDED_BY(OptionsLock)
-  std::map<std::string, std::string> OptionProviderErrors; // GUARDED_BY(OptionsLock)
+  std::map<std::string, EvalExprError> OptionProviderErrors; // GUARDED_BY(OptionsLock)
   std::set<std::string> ReadyOptions;     // GUARDED_BY(OptionsLock)
   std::set<std::string> SettledOptions;   // GUARDED_BY(OptionsLock)
   // Map of option providers.
@@ -74,7 +74,7 @@ private:
                             std::string_view Description,
                             llvm::unique_function<void()> OnSuccess = nullptr,
                             llvm::unique_function<void(
-                                bool, std::optional<std::string>)> OnDone =
+                                bool, std::optional<EvalExprError>)> OnDone =
                                 nullptr);
 
   lspserver::DraftStore Store;
@@ -303,14 +303,14 @@ private:
                                  std::uint64_t EvalGeneration);
   bool noteOptionProviderSettled(
       std::string_view Name, std::uint64_t EvalGeneration,
-      std::optional<std::string> Error = std::nullopt);
+      std::optional<EvalExprError> Error = std::nullopt);
   bool allOptionProvidersReadyLocked() const;
   bool allOptionProvidersSettledLocked() const;
   bool waitForOptionProvidersReadyForTests();
   bool optionProvidersReadyForDiagnostics();
   bool optionProvidersSettledForDiagnostics();
   std::vector<OptionProviderRef> optionProviderSnapshot();
-  std::vector<std::pair<std::string, std::string>> optionProviderFailureSnapshot();
+  std::vector<OptionProviderFailure> optionProviderFailureSnapshot();
   std::vector<ResolvedOptionField>
   completeOptions(const std::vector<std::string> &Scope,
                   const std::string &Prefix);

@@ -38,7 +38,17 @@ constexpr inline std::string_view Exit = "exit";
 } // namespace rpcMethod
 
 using EvalExprParams = std::string;
-using EvalExprResponse = std::optional<std::string>;
+
+struct EvalExprError {
+  std::string Message;
+  std::optional<lspserver::Location> Location;
+};
+
+llvm::json::Value toJSON(const EvalExprError &Params);
+bool fromJSON(const llvm::json::Value &Params, EvalExprError &R,
+              llvm::json::Path P);
+
+using EvalExprResponse = std::optional<EvalExprError>;
 
 /// \brief A list of strings that "select"s into a attribute set.
 using Selector = std::vector<std::string>;

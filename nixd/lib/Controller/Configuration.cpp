@@ -220,7 +220,7 @@ void Controller::reevaluateOptionProviders(bool RestartWorkers) {
               BatchNeedsRefresh->store(true, std::memory_order_release);
           },
           [this, Name, EvalGeneration, BatchNeedsRefresh,
-           finishProvider](bool Success, std::optional<std::string> Error) {
+           finishProvider](bool Success, std::optional<EvalExprError> Error) {
             if (!Success) {
               if (noteOptionProviderSettled(Name, EvalGeneration,
                                             std::move(Error)))

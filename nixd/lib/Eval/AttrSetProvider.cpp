@@ -9,7 +9,11 @@
 #include <nix/expr/attr-path.hh>
 #include <nix/expr/nixexpr.hh>
 #include <nix/store/store-open.hh>
+#include <nix/util/position.hh>
 #include <nixt/Value.h>
+
+#include <optional>
+#include <utility>
 
 using namespace nixd;
 using namespace lspserver;
@@ -26,6 +30,50 @@ bool isModuleArgumentOptionPath(const AttrPathInfoParams &AttrPath) {
   const auto BeforeLast = Last - 1;
   return *BeforeLast == "_module" &&
          (*Last == "args" || *Last == "specialArgs");
+}
+
+std::optional<Location> locationOfPos(const nix::Pos &Pos) {
+  if (!Pos)
+    return std::nullopt;
+
+  std::optional<nix::SourcePath> Source = Pos.getSourcePath();
+  if (!Source)
+    return std::nullopt;
+
+  Position LPos = {
+      .line = static_cast<int64_t>(Pos.line - 1),
+      .character = static_cast<int64_t>(Pos.column > 0 ? Pos.column - 1 : 0),
+  };
+
+  return Location{
+      .uri = URIForFile::canonicalize(Source->path.abs(), Source->path.abs()),
+      .range = {LPos, LPos},
+  };
+}
+
+std::optional<Location> primaryErrorLocation(const nix::ErrorInfo &Info) {
+  if (Info.pos)
+    if (std::optional<Location> Location = locationOfPos(*Info.pos))
+      return Location;
+
+  for (const nix::Trace &Trace : Info.traces)
+    if (Trace.pos)
+      if (std::optional<Location> Location = locationOfPos(*Trace.pos))
+        return Location;
+
+  return std::nullopt;
+}
+
+EvalExprResponse evalExprError(const nix::BaseError &Err) {
+  const nix::ErrorInfo &Info = Err.info();
+  return EvalExprError{
+      .Message = Info.msg.str(),
+      .Location = primaryErrorLocation(Info),
+  };
+}
+
+EvalExprResponse evalExprError(std::string Message) {
+  return EvalExprError{.Message = std::move(Message)};
 }
 
 void fillOptionValueAttrNames(nix::EvalState &State, nix::Value &Option,
@@ -74,18 +122,18 @@ AttrSetProvider::AttrSetProvider(std::unique_ptr<InboundPort> In,
 }
 
 void AttrSetProvider::onEvalExpr(
-    const std::string &Name,
-    lspserver::Callback<std::optional<std::string>> Reply) {
+    const EvalExprParams &Name,
+    lspserver::Callback<EvalExprResponse> Reply) {
   try {
     nix::Expr *AST = state().parseExprFromString(Name, state().rootPath("."));
     state().eval(AST, Nixpkgs);
     Reply(std::nullopt);
     return;
   } catch (const nix::BaseError &Err) {
-    Reply(error(Err.info().msg.str()));
+    Reply(evalExprError(Err));
     return;
   } catch (const std::exception &Err) {
-    Reply(error(Err.what()));
+    Reply(evalExprError(Err.what()));
     return;
   }
 }

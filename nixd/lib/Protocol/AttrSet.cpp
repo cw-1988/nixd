@@ -3,6 +3,21 @@
 using namespace nixd;
 using namespace llvm::json;
 
+Value nixd::toJSON(const EvalExprError &Params) {
+  Object Result{{"Message", Params.Message}};
+  if (Params.Location)
+    Result.try_emplace("Location", *Params.Location);
+  return Result;
+}
+
+bool nixd::fromJSON(const Value &Params, EvalExprError &R, Path P) {
+  R = EvalExprError{};
+  ObjectMapper O(Params, P);
+  return O                                        //
+         && O.map("Message", R.Message)          //
+         && O.mapOptional("Location", R.Location);
+}
+
 Value nixd::toJSON(const OptionType::EnumValue &Params) {
   if (Params.String)
     return *Params.String;

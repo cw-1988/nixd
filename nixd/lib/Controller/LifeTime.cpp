@@ -65,7 +65,7 @@ void Controller::evalExprWithProgress(AttrSetClient &Client,
                                       std::string_view Description,
                                       llvm::unique_function<void()> OnSuccess,
                                       llvm::unique_function<void(
-                                          bool, std::optional<std::string>)>
+                                          bool, std::optional<EvalExprError>)>
                                           OnDone) {
   auto Token = rand();
   auto Action = [Token, Description = std::string(Description),
@@ -73,15 +73,19 @@ void Controller::evalExprWithProgress(AttrSetClient &Client,
                  OnDone = std::move(OnDone),
                  this](llvm::Expected<EvalExprResponse> Resp) mutable {
     bool Success = false;
-    std::optional<std::string> ErrorMessage;
+    std::optional<EvalExprError> ErrorMessage;
     endWorkDoneProgress({
         .token = Token,
         .value = WorkDoneProgressEnd{.message = "evaluated " +
                                                 std::string(Description)},
     });
     if (!Resp) {
-      ErrorMessage = llvm::toString(Resp.takeError());
-      lspserver::elog("{0} eval expr: {1}", Description, *ErrorMessage);
+      ErrorMessage = EvalExprError{.Message = llvm::toString(Resp.takeError())};
+      lspserver::elog("{0} eval expr: {1}", Description, ErrorMessage->Message);
+    } else if (*Resp) {
+      ErrorMessage = std::move(**Resp);
+      ErrorMessage->Message = "-32001: " + ErrorMessage->Message;
+      lspserver::elog("{0} eval expr: {1}", Description, ErrorMessage->Message);
     } else {
       Success = true;
       if (OnSuccess)

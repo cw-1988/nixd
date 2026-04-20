@@ -5,6 +5,7 @@
 #include "nixd/Controller/Controller.h"
 #include "nixd/Controller/FlakeInputInspect.h"
 #include "nixd/Controller/Option.h"
+#include "lspserver/SourceCode.h"
 
 #include <algorithm>
 #include <functional>
@@ -19,6 +20,8 @@
 
 #include <nixf/Basic/Nodes/Attrs.h>
 #include <nixf/Basic/Nodes/Lambda.h>
+
+#include <llvm/Support/Error.h>
 
 using namespace nixd;
 using namespace nixd::option_diagnostics;
@@ -662,18 +665,110 @@ findBindingRangeForScope(const nixf::Node &Node,
   return findBindingRangeForScopeImpl(Node, Scope, {});
 }
 
+bool locationMatchesFile(const lspserver::Location &Location,
+                         std::string_view File) {
+  llvm::StringRef FileRef(File.data(), File.size());
+  lspserver::URIForFile Current =
+      lspserver::URIForFile::canonicalize(FileRef, FileRef);
+  return Location.uri.file() == Current.file();
+}
+
+std::optional<nixf::LexerCursor>
+cursorFromPosition(std::string_view Src, const lspserver::Position &Position) {
+  llvm::StringRef SrcRef(Src.data(), Src.size());
+  llvm::Expected<size_t> Offset =
+      lspserver::positionToOffset(SrcRef, Position,
+                                  /*AllowColumnsBeyondLineLength=*/false);
+  if (!Offset) {
+    llvm::consumeError(Offset.takeError());
+    return std::nullopt;
+  }
+  return nixf::LexerCursor::unsafeCreate(Position.line, Position.character,
+                                         *Offset);
+}
+
+std::optional<nixf::LexerCursorRange>
+rangeFromLocation(const lspserver::Location &Location, std::string_view Src) {
+  std::optional<nixf::LexerCursor> Start =
+      cursorFromPosition(Src, Location.range.start);
+  if (!Start)
+    return std::nullopt;
+
+  std::optional<nixf::LexerCursor> End =
+      cursorFromPosition(Src, Location.range.end);
+  if (!End)
+    return std::nullopt;
+
+  if (End->offset() <= Start->offset() && Start->offset() < Src.size() &&
+      Src[Start->offset()] != '\n') {
+    llvm::StringRef SrcRef(Src.data(), Src.size());
+    const lspserver::Position EndPos =
+        lspserver::offsetToPosition(SrcRef, Start->offset() + 1);
+    End = nixf::LexerCursor::unsafeCreate(EndPos.line, EndPos.character,
+                                          Start->offset() + 1);
+  }
+
+  return nixf::LexerCursorRange(*Start, *End);
+}
+
+std::optional<nixf::LexerCursorRange>
+expandPointRangeBackward(nixf::LexerCursorRange Range, std::string_view Src) {
+  if (Range.lCur().offset() != Range.rCur().offset() ||
+      Range.lCur().offset() == 0)
+    return Range;
+
+  const size_t StartOffset = Range.lCur().offset() - 1;
+  if (Src[StartOffset] == '\n')
+    return Range;
+
+  llvm::StringRef SrcRef(Src.data(), Src.size());
+  const lspserver::Position StartPos =
+      lspserver::offsetToPosition(SrcRef, StartOffset);
+  nixf::LexerCursor Start = nixf::LexerCursor::unsafeCreate(
+      StartPos.line, StartPos.character, StartOffset);
+  return nixf::LexerCursorRange(Start, Range.rCur());
+}
+
+std::optional<nixf::LexerCursorRange>
+localSyntaxErrorRange(const NixTU &TU, std::string_view Src) {
+  for (const nixf::Diagnostic &Diagnostic : TU.diagnostics()) {
+    const nixf::Diagnostic::Severity Severity =
+        nixf::Diagnostic::severity(Diagnostic.kind());
+    const std::string_view Name = nixf::Diagnostic::sname(Diagnostic.kind());
+    if (Severity <= nixf::Diagnostic::DS_Error &&
+        (Name.starts_with("parse-") || Name.starts_with("lex-")))
+      return expandPointRangeBackward(Diagnostic.range(), Src);
+  }
+  return std::nullopt;
+}
+
+bool isProviderSyntaxError(std::string_view Message) {
+  return Message.find("syntax error") != std::string_view::npos;
+}
+
 std::vector<NixdDiagnostic> providerFailureDiagnostics(
-    const NixTU &TU, const std::vector<std::pair<std::string, std::string>> &Failures) {
+    const NixTU &TU, std::string_view File, std::string_view Src,
+    const std::vector<OptionProviderFailure> &Failures) {
   std::vector<NixdDiagnostic> Diagnostics;
   Diagnostics.reserve(Failures.size());
 
   const nixf::LexerCursor Start = nixf::LexerCursor::unsafeCreate(0, 0, 0);
-  for (const auto &[Name, Error] : Failures) {
+  for (const OptionProviderFailure &Failure : Failures) {
     std::optional<nixf::LexerCursorRange> Range;
+    if (Failure.Location) {
+      if (!locationMatchesFile(*Failure.Location, File))
+        continue;
+      if (isProviderSyntaxError(Failure.Message))
+        Range = localSyntaxErrorRange(TU, Src);
+      if (!Range)
+        Range = rangeFromLocation(*Failure.Location, Src);
+    }
+
     if (TU.ast() && TU.parentMap()) {
       if (std::optional<std::vector<std::string>> Scope =
-              extractOptionScopeFromProviderError(Error)) {
-        Range = findBindingRangeForScope(*TU.ast(), *Scope);
+              extractOptionScopeFromProviderError(Failure.Message)) {
+        if (!Range)
+          Range = findBindingRangeForScope(*TU.ast(), *Scope);
       }
     }
     Diagnostics.push_back(NixdDiagnostic{
@@ -681,8 +776,8 @@ std::vector<NixdDiagnostic> providerFailureDiagnostics(
         .Severity = NixdDiagnosticSeverity::Error,
         .Code = "option-provider-eval",
         .Source = "nixd",
-        .Message = "option provider `" + Name + "` failed to evaluate: " +
-                   Error,
+        .Message = "option provider `" + Failure.ProviderName +
+                   "` failed to evaluate: " + Failure.Message,
     });
   }
   return Diagnostics;
@@ -693,10 +788,6 @@ std::vector<NixdDiagnostic> providerFailureDiagnostics(
 std::vector<NixdDiagnostic>
 Controller::collectOptionDiagnostics(const NixTU &TU, std::string_view File) {
   std::vector<NixdDiagnostic> Diagnostics;
-  if (!TU.ast() || !TU.parentMap())
-    return Diagnostics;
-  if (hasRecoverySyntaxError(TU))
-    return Diagnostics;
   const bool IsFlakeSchema = flake_schema::isFlakeFile(File);
   if (!IsFlakeSchema) {
     if (!waitForOptionProvidersReadyForTests())
@@ -704,11 +795,20 @@ Controller::collectOptionDiagnostics(const NixTU &TU, std::string_view File) {
     if (!optionProvidersSettledForDiagnostics())
       return Diagnostics;
 
+    std::vector<OptionProviderFailure> Failures =
+        optionProviderFailureSnapshot();
     std::vector<NixdDiagnostic> ProviderDiagnostics =
-        providerFailureDiagnostics(TU, optionProviderFailureSnapshot());
+        providerFailureDiagnostics(TU, File, TU.src(), Failures);
     std::move(ProviderDiagnostics.begin(), ProviderDiagnostics.end(),
               std::back_inserter(Diagnostics));
+    if (!Failures.empty())
+      return Diagnostics;
   }
+
+  if (!TU.ast() || !TU.parentMap())
+    return Diagnostics;
+  if (hasRecoverySyntaxError(TU))
+    return Diagnostics;
 
   OptionDiagnosticContext Context;
   auto Resolve = [this, IsFlakeSchema](
