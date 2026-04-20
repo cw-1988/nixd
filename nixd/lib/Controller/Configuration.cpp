@@ -112,25 +112,29 @@ void Controller::enqueueOptionProviderReevaluation(bool RestartWorkers) {
   if (!ShouldPost)
     return;
 
-  postToPool([this]() {
-    while (true) {
-      bool RestartWorkers = false;
-      {
-        std::lock_guard _(OptionReevaluationLock);
-        if (!OptionReevaluationQueued) {
-          OptionReevaluationRunning = false;
-          return;
-        }
-        OptionReevaluationQueued = false;
-        RestartWorkers = OptionReevaluationRestartWorkers;
-        OptionReevaluationRestartWorkers = false;
-      }
-      reevaluateOptionProviders(RestartWorkers);
+  postToPool([this]() { processOptionProviderReevaluationQueue(); });
+}
+
+void Controller::processOptionProviderReevaluationQueue() {
+  bool RestartWorkers = false;
+  {
+    std::lock_guard _(OptionReevaluationLock);
+    if (!OptionReevaluationQueued) {
+      OptionReevaluationRunning = false;
+      return;
     }
+    OptionReevaluationQueued = false;
+    RestartWorkers = OptionReevaluationRestartWorkers;
+    OptionReevaluationRestartWorkers = false;
+  }
+
+  reevaluateOptionProviders(RestartWorkers, [this]() {
+    postToPool([this]() { processOptionProviderReevaluationQueue(); });
   });
 }
 
-void Controller::reevaluateOptionProviders(bool RestartWorkers) {
+void Controller::reevaluateOptionProviders(bool RestartWorkers,
+                                           llvm::unique_function<void()> OnDone) {
   Configuration ActiveConfig;
   {
     std::lock_guard G(ConfigLock);
@@ -174,6 +178,8 @@ void Controller::reevaluateOptionProviders(bool RestartWorkers) {
   if (ProviderExprs.empty()) {
     if (NeedDiagnosticRefresh && !ShuttingDown)
       postToDiagnosticsPool([this]() { refreshDiagnostics(); });
+    if (OnDone)
+      OnDone();
     return;
   }
 
@@ -182,12 +188,16 @@ void Controller::reevaluateOptionProviders(bool RestartWorkers) {
   auto BatchNeedsRefresh =
       std::make_shared<std::atomic<bool>>(NeedDiagnosticRefresh ||
                                           !ProviderExprs.empty());
-  auto finishProvider = [this, RemainingProviders, BatchNeedsRefresh]() {
+  auto ReevaluationDone =
+      std::make_shared<llvm::unique_function<void()>>(std::move(OnDone));
+  auto finishProvider = [this, RemainingProviders, BatchNeedsRefresh,
+                         ReevaluationDone]() {
     if (RemainingProviders->fetch_sub(1, std::memory_order_acq_rel) != 1)
       return;
-    if (!BatchNeedsRefresh->load(std::memory_order_acquire) || ShuttingDown)
-      return;
-    postToDiagnosticsPool([this]() { refreshDiagnostics(); });
+    if (BatchNeedsRefresh->load(std::memory_order_acquire) && !ShuttingDown)
+      postToDiagnosticsPool([this]() { refreshDiagnostics(); });
+    if (*ReevaluationDone)
+      (*ReevaluationDone)();
   };
 
   for (const auto &[Name, Expr] : ProviderExprs) {
