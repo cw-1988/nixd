@@ -755,9 +755,7 @@ std::vector<NixdDiagnostic> providerFailureDiagnostics(
   const nixf::LexerCursor Start = nixf::LexerCursor::unsafeCreate(0, 0, 0);
   for (const OptionProviderFailure &Failure : Failures) {
     std::optional<nixf::LexerCursorRange> Range;
-    if (Failure.Location) {
-      if (!locationMatchesFile(*Failure.Location, File))
-        continue;
+    if (Failure.Location && locationMatchesFile(*Failure.Location, File)) {
       if (isProviderSyntaxError(Failure.Message))
         Range = localSyntaxErrorRange(TU, Src);
       if (!Range)
