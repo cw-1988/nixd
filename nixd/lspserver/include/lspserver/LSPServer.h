@@ -8,7 +8,9 @@
 #include <llvm/Support/Error.h>
 #include <llvm/Support/JSON.h>
 
+#include <atomic>
 #include <memory>
+#include <optional>
 
 namespace lspserver {
 
@@ -18,6 +20,7 @@ class LSPServer : public MessageHandler {
 private:
   std::unique_ptr<InboundPort> In;
   std::unique_ptr<OutboundPort> Out;
+  std::atomic<bool> ConnectionClosed = false;
 
   bool onNotify(llvm::StringRef Method, llvm::json::Value) override;
   bool onCall(llvm::StringRef Method, llvm::json::Value Params,
@@ -42,11 +45,15 @@ private:
   int TopID = 1;
 
   /// Allocate an "ID" (as returned value) for this callback.
-  int bindReply(Callback<llvm::json::Value>);
+  std::optional<int> bindReply(Callback<llvm::json::Value>);
+  void failPendingCalls(llvm::StringRef Reason);
 
   void callMethod(llvm::StringRef Method, llvm::json::Value Params,
                   Callback<llvm::json::Value> CB, OutboundPort *O) {
-    llvm::json::Value ID(bindReply(std::move(CB)));
+    std::optional<int> BoundID = bindReply(std::move(CB));
+    if (!BoundID)
+      return;
+    llvm::json::Value ID(*BoundID);
     log("--> call {0}({1})", Method, ID.getAsInteger());
     O->call(Method, Params, ID);
   }
@@ -58,7 +65,9 @@ protected:
   mkOutNotifiction(llvm::StringRef Method, OutboundPort *O = nullptr) {
     if (!O)
       O = Out.get();
-    return [=](const T &Params) {
+    return [=, this](const T &Params) {
+      if (connectionClosed())
+        return;
       log("--> notify {0}", Method);
       O->notify(Method, Params);
     };
@@ -89,6 +98,7 @@ public:
 
   /// \brief Close the inbound port.
   void closeInbound() { In->close(); }
+  bool connectionClosed() const { return ConnectionClosed.load(); }
   void run();
 
   void switchStreamStyle(JSONStreamStyle Style) { In->StreamStyle = Style; }

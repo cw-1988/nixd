@@ -12,7 +12,10 @@
 
 namespace lspserver {
 
-void LSPServer::run() { In->loop(*this); }
+void LSPServer::run() {
+  In->loop(*this);
+  failPendingCalls("connection closed before receiving a reply");
+}
 
 bool LSPServer::onNotify(llvm::StringRef Method, llvm::json::Value Params) {
   log("<-- {0}", Method);
@@ -78,23 +81,54 @@ bool LSPServer::onReply(llvm::json::Value ID,
   return true;
 }
 
-int LSPServer::bindReply(Callback<llvm::json::Value> CB) {
-  std::lock_guard<std::mutex> _(PendingCallsLock);
-  int Ret = TopID++;
-  PendingCalls[Ret] = std::move(CB);
+std::optional<int> LSPServer::bindReply(Callback<llvm::json::Value> CB) {
+  std::optional<Callback<llvm::json::Value>> FailedCallback;
+  std::optional<int> Ret;
+  std::optional<std::tuple<int, Callback<llvm::json::Value>>> OldestCall;
+  {
+    std::lock_guard<std::mutex> _(PendingCallsLock);
+    if (ConnectionClosed) {
+      FailedCallback = std::move(CB);
+    } else {
+      Ret = TopID++;
+      PendingCalls[*Ret] = std::move(CB);
+    }
 
-  // Check the limit
-  if (PendingCalls.size() > MaxPendingCalls) {
-    auto Begin = PendingCalls.begin();
-    auto [ID, OldestCallback] =
-        std::tuple{Begin->first, std::move(Begin->second)};
+    // Check the limit
+    if (PendingCalls.size() > MaxPendingCalls) {
+      auto Begin = PendingCalls.begin();
+      OldestCall = std::tuple{Begin->first, std::move(Begin->second)};
+      PendingCalls.erase(Begin);
+    }
+  }
+
+  if (FailedCallback) {
+    (*FailedCallback)(
+        error("failed to receive a client reply: connection is closed"));
+    return std::nullopt;
+  }
+
+  if (OldestCall) {
+    auto &[ID, OldestCallback] = *OldestCall;
     OldestCallback(
         error("failed to receive a client reply for request ({0})", ID));
     elog("more than {0} outstanding LSP calls, forgetting about {1}",
          MaxPendingCalls, ID);
-    PendingCalls.erase(Begin);
   }
   return Ret;
+}
+
+void LSPServer::failPendingCalls(llvm::StringRef Reason) {
+  std::map<int, Callback<llvm::json::Value>> Calls;
+  {
+    std::lock_guard<std::mutex> _(PendingCallsLock);
+    ConnectionClosed = true;
+    Calls.swap(PendingCalls);
+  }
+
+  for (auto &[ID, CB] : Calls)
+    CB(error("failed to receive a client reply for request ({0}): {1}", ID,
+             Reason));
 }
 
 } // namespace lspserver
