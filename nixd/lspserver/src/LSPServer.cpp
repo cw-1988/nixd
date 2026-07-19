@@ -12,7 +12,11 @@
 
 namespace lspserver {
 
-void LSPServer::run() { In->loop(*this); }
+void LSPServer::run() {
+  In->loop(*this);
+  Closed = true;
+  failPendingCalls();
+}
 
 bool LSPServer::onNotify(llvm::StringRef Method, llvm::json::Value Params) {
   log("<-- {0}", Method);
@@ -95,6 +99,17 @@ int LSPServer::bindReply(Callback<llvm::json::Value> CB) {
     PendingCalls.erase(Begin);
   }
   return Ret;
+}
+
+void LSPServer::failPendingCalls() {
+  std::map<int, Callback<llvm::json::Value>> Calls;
+  {
+    std::lock_guard<std::mutex> Guard(PendingCallsLock);
+    Calls.swap(PendingCalls);
+  }
+
+  for (auto &[ID, CB] : Calls)
+    CB(error("connection closed while waiting for reply ({0})", ID));
 }
 
 } // namespace lspserver

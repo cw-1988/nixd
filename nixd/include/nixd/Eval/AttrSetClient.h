@@ -82,7 +82,8 @@ public:
   /// \returns nullptr if it has been dead.
   AttrSetClient *client();
   ~AttrSetClientProc() {
-    Client.exit();
+    if (!Client.isClosed())
+      Client.exit();
     Client.closeInbound();
     Input.join();
   }

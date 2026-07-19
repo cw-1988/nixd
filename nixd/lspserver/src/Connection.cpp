@@ -121,6 +121,10 @@ void OutboundPort::sendMessage(llvm::json::Value Message) {
   Outs << "Content-Length: " << OutputBuffer.size() << "\r\n\r\n"
        << OutputBuffer;
   Outs.flush();
+  if (FDOuts && FDOuts->has_error()) {
+    elog("failed to write LSP message");
+    FDOuts->clear_error();
+  }
 }
 
 bool InboundPort::dispatch(llvm::json::Value Message, MessageHandler &Handler) {

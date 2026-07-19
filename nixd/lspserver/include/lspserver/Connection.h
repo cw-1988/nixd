@@ -70,6 +70,7 @@ public:
 class OutboundPort {
 private:
   llvm::raw_ostream &Outs;
+  llvm::raw_fd_ostream *FDOuts = nullptr;
 
   llvm::SmallVector<char, 0> OutputBuffer;
 
@@ -79,7 +80,9 @@ private:
 
 public:
   explicit OutboundPort(bool Pretty = false)
-      : Outs(llvm::outs()), Pretty(Pretty) {}
+      : Outs(llvm::outs()), FDOuts(&llvm::outs()), Pretty(Pretty) {}
+  OutboundPort(llvm::raw_fd_ostream &Outs, bool Pretty = false)
+      : Outs(Outs), FDOuts(&Outs), OutputBuffer(), Pretty(Pretty) {}
   OutboundPort(llvm::raw_ostream &Outs, bool Pretty = false)
       : Outs(Outs), OutputBuffer(), Pretty(Pretty) {}
   void notify(llvm::StringRef Method, llvm::json::Value Params);

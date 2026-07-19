@@ -8,6 +8,7 @@
 #include <llvm/Support/Error.h>
 #include <llvm/Support/JSON.h>
 
+#include <atomic>
 #include <memory>
 
 namespace lspserver {
@@ -18,6 +19,8 @@ class LSPServer : public MessageHandler {
 private:
   std::unique_ptr<InboundPort> In;
   std::unique_ptr<OutboundPort> Out;
+
+  std::atomic<bool> Closed = false;
 
   bool onNotify(llvm::StringRef Method, llvm::json::Value) override;
   bool onCall(llvm::StringRef Method, llvm::json::Value Params,
@@ -44,8 +47,15 @@ private:
   /// Allocate an "ID" (as returned value) for this callback.
   int bindReply(Callback<llvm::json::Value>);
 
+  /// Fail and clear calls that can no longer receive a reply.
+  void failPendingCalls();
+
   void callMethod(llvm::StringRef Method, llvm::json::Value Params,
                   Callback<llvm::json::Value> CB, OutboundPort *O) {
+    if (Closed) {
+      CB(error("connection closed while trying to call {0}", Method));
+      return;
+    }
     llvm::json::Value ID(bindReply(std::move(CB)));
     log("--> call {0}({1})", Method, ID.getAsInteger());
     O->call(Method, Params, ID);
@@ -89,6 +99,7 @@ public:
 
   /// \brief Close the inbound port.
   void closeInbound() { In->close(); }
+  bool isClosed() const { return Closed; }
   void run();
 
   void switchStreamStyle(JSONStreamStyle Style) { In->StreamStyle = Style; }

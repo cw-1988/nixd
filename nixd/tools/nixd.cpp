@@ -9,6 +9,8 @@
 #include <llvm/ADT/ArrayRef.h>
 #include <llvm/Support/CommandLine.h>
 
+#include <csignal>
+
 using namespace lspserver;
 using namespace nixd;
 
@@ -47,6 +49,8 @@ opt<bool> PrettyPrint{"pretty", desc("Pretty-print JSON output"), init(false),
 } // namespace
 
 int main(int argc, char *argv[]) {
+  std::signal(SIGPIPE, SIG_IGN);
+
   SetVersionPrinter([](llvm::raw_ostream &OS) {
     OS << "nixd, version: ";
 #ifdef NIXD_VCS_TAG

@@ -7,6 +7,7 @@
 #include <lspserver/Connection.h>
 #include <nixt/InitEval.h>
 
+#include <csignal>
 #include <unistd.h>
 
 using namespace llvm::cl;
@@ -47,6 +48,7 @@ const OptionCategory *Catogories[] = {&Misc, &Debug};
 } // namespace
 
 int main(int Argc, const char *Argv[]) {
+  std::signal(SIGPIPE, SIG_IGN);
 
   SetVersionPrinter([](llvm::raw_ostream &OS) {
     OS << "nixd-attrset-eval, version: ";
