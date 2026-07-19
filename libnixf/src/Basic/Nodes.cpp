@@ -1,3 +1,5 @@
+#include "Tokens.h"
+#include "nixf/Basic/Nodes/Op.h"
 #include "nixf/Basic/Nodes/Simple.h"
 
 using namespace nixf;
@@ -49,6 +51,8 @@ mergeFragments(std::vector<InterpolablePart> Fragments) {
   assert(false && "Not yet implemented!");
   __builtin_unreachable();
 }
+
+bool Op::isNegate() const { return OpKind == tok::tok_op_negate; }
 
 InterpolatedParts::InterpolatedParts(LexerCursorRange Range,
                                      std::vector<InterpolablePart> Fragments)

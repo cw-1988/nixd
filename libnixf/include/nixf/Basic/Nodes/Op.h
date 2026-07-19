@@ -20,6 +20,8 @@ public:
 
   [[nodiscard]] tok::TokenKind op() const { return OpKind; }
 
+  [[nodiscard]] bool isNegate() const;
+
   [[nodiscard]] ChildVector children() const override { return {}; }
 };
 

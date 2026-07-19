@@ -1,7 +1,6 @@
 #include "Integer.h"
 
 #include "nixf/Basic/Nodes/Op.h"
-#include "nixf/Parse/Tokens.h"
 
 #include <charconv>
 #include <limits>
@@ -180,7 +179,7 @@ nixd::option_integer::constantValue(const Expr &Value) {
     return static_cast<const ExprInt &>(Value).value();
   case NK::NK_ExprUnaryOp: {
     const auto &Unary = static_cast<const ExprUnaryOp &>(Value);
-    if (Unary.op().op() != tok::tok_op_negate)
+    if (!Unary.op().isNegate())
       return std::nullopt;
     const Expr *Inner = Unary.expr();
     if (!Inner)
