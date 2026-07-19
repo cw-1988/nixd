@@ -17,7 +17,7 @@ def generate_tokens_h() -> str:
 
 namespace nixf::tok {
 
-enum TokenKind {
+enum TokenKind : unsigned {
 """
     for token in tokens.tokens:
         header += f"    {tok_id(token)},\n"

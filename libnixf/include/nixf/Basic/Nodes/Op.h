@@ -1,13 +1,15 @@
 #pragma once
 
 #include "Basic.h"
-#include "Tokens.h"
-
 #include "nixf/Basic/Nodes/Attrs.h"
 
 #include <memory>
 
 namespace nixf {
+
+namespace tok {
+enum TokenKind : unsigned;
+}
 
 class Op : public Node {
   const tok::TokenKind OpKind;

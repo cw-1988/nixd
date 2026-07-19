@@ -1,6 +1,7 @@
 #include "Integer.h"
 
 #include "nixf/Basic/Nodes/Op.h"
+#include "nixf/Parse/Tokens.h"
 
 #include <charconv>
 #include <limits>
