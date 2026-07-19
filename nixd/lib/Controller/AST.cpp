@@ -2,6 +2,10 @@
 
 #include "nixd/Protocol/AttrSet.h"
 
+#include <nixf/Basic/Nodes/Op.h>
+#include <nixf/Basic/Nodes/Simple.h>
+#include <Tokens.h>
+
 #include <unordered_set>
 
 using namespace nixf;
@@ -53,10 +57,31 @@ void getValueAttrPath(const nixf::Node &N, const nixf::ParentMapAnalysis &PM,
   if (!Up)
     return;
 
-  Up = PM.upExpr(*Up);
+  const nixf::Node *Child = &N;
+  while (Up) {
+    Up = PM.upExpr(*Up);
+    if (!Up)
+      return;
 
-  if (!Up)
-    return;
+    if (Up->kind() == Node::NK_ExprParen &&
+        static_cast<const ExprParen &>(*Up).expr() == Child) {
+      Child = Up;
+      Up = PM.query(*Up);
+      continue;
+    }
+
+    if (Up->kind() == Node::NK_ExprBinOp) {
+      const auto &BinOp = static_cast<const ExprBinOp &>(*Up);
+      if (BinOp.op().op() == tok::tok_op_update &&
+          (BinOp.lhs() == Child || BinOp.rhs() == Child)) {
+        Child = Up;
+        Up = PM.query(*Up);
+        continue;
+      }
+    }
+
+    break;
+  }
 
   // Only attrs can "nest something"
   if (Up->kind() != Node::NK_ExprAttrs)
@@ -76,7 +101,7 @@ void getValueAttrPath(const nixf::Node &N, const nixf::ParentMapAnalysis &PM,
       continue;
     assert(Attr->kind() == Node::NK_Binding);
     const auto &Binding = static_cast<const nixf::Binding &>(*Attr);
-    if (Binding.value().get() == &N) {
+    if (Binding.value().get() == Child) {
       getSelectAttrPath(*Binding.path().names().back(), PM, Path);
       return;
     }
