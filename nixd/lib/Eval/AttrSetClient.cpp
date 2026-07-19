@@ -2,6 +2,10 @@
 
 #include "nixd/Eval/AttrSetClient.h"
 
+#include <llvm/ADT/SmallString.h>
+#include <llvm/Support/FileSystem.h>
+#include <llvm/Support/Path.h>
+
 #include <signal.h> // NOLINT(modernize-deprecated-headers)
 
 using namespace nixd;
@@ -26,6 +30,19 @@ AttrSetClient::AttrSetClient(std::unique_ptr<lspserver::InboundPort> In,
 const char *AttrSetClient::getExe() {
   if (const char *Env = std::getenv("NIXD_ATTRSET_EVAL"))
     return Env;
+
+  static std::string SiblingExe = []() {
+    llvm::SmallString<256> Path(llvm::sys::fs::getMainExecutable(
+        "nixd", reinterpret_cast<void *>(&AttrSetClient::getExe)));
+    llvm::sys::path::remove_filename(Path);
+    llvm::sys::path::append(Path, "nixd-attrset-eval");
+    if (llvm::sys::fs::can_execute(Path))
+      return Path.str().str();
+    return std::string();
+  }();
+  if (!SiblingExe.empty())
+    return SiblingExe.c_str();
+
   return NIXD_LIBEXEC "/nixd-attrset-eval";
 }
 
