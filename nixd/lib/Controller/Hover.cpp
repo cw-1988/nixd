@@ -6,6 +6,8 @@
 #include "AST.h"
 #include "CheckReturn.h"
 #include "Convert.h"
+#include "Definition.h"
+#include "PathResolve.h"
 
 #include "nixd/Controller/Controller.h"
 #include "nixd/Protocol/AttrSet.h"
@@ -14,8 +16,19 @@
 
 #include <llvm/Support/Error.h>
 
+#include <nixf/Basic/Nodes/Attrs.h>
+#include <nixf/Basic/Nodes/Expr.h>
+#include <nixf/Basic/Nodes/Lambda.h>
+#include <nixf/Basic/Nodes/Simple.h>
+#include <nixf/Parse/Parser.h>
+
+#include <fstream>
+#include <memory>
+#include <optional>
 #include <semaphore>
 #include <sstream>
+#include <string>
+#include <vector>
 
 using namespace nixd;
 using namespace llvm::json;
@@ -198,6 +211,345 @@ std::optional<Hover> hoverSelect(const ExprSelect &Sel,
   return std::nullopt;
 }
 
+const Node *definitionPreviewNode(const Definition &Def,
+                                  const ParentMapAnalysis &PM) {
+  if (!Def.syntax())
+    return nullptr;
+
+  if (const Node *Binding = PM.upTo(*Def.syntax(), Node::NK_Binding))
+    return Binding;
+
+  return Def.syntax();
+}
+
+const Node *keyPreviewNode(const Node &Key, const ParentMapAnalysis &PM) {
+  if (const Node *Binding = PM.upTo(Key, Node::NK_Binding))
+    return Binding;
+
+  return &Key;
+}
+
+std::string previewSource(const Node &Preview, llvm::StringRef Src) {
+  std::string Text(Preview.src(Src));
+  std::size_t Indent = static_cast<std::size_t>(Preview.lCur().column());
+  if (Indent == 0)
+    return Text;
+
+  std::string Result;
+  Result.reserve(Text.size());
+  bool AtLineStart = false;
+  for (std::size_t I = 0; I < Text.size();) {
+    if (AtLineStart) {
+      std::size_t Skipped = 0;
+      while (Skipped < Indent && I < Text.size() && Text[I] == ' ') {
+        ++I;
+        ++Skipped;
+      }
+      AtLineStart = false;
+      if (I >= Text.size())
+        break;
+    }
+
+    char C = Text[I++];
+    Result += C;
+    if (C == '\n')
+      AtLineStart = true;
+  }
+
+  return Result;
+}
+
+std::string fencedPreview(const Node &Preview, llvm::StringRef Src) {
+  std::string Snippet = previewSource(Preview, Src);
+  std::string Docs;
+  Docs.reserve(Snippet.size() + 10);
+  Docs += "```nix\n";
+  Docs += Snippet;
+  Docs += "\n```";
+  return Docs;
+}
+
+const Expr *ignoreParens(const Expr *E) {
+  while (E && E->kind() == Node::NK_ExprParen)
+    E = static_cast<const ExprParen &>(*E).expr();
+  return E;
+}
+
+const Expr *returnedExpr(const Expr *E) {
+  while (const Expr *Unwrapped = ignoreParens(E)) {
+    E = Unwrapped;
+    switch (E->kind()) {
+    case Node::NK_ExprLambda:
+      E = static_cast<const ExprLambda &>(*E).body();
+      continue;
+    case Node::NK_ExprLet:
+      E = static_cast<const ExprLet &>(*E).expr();
+      continue;
+    default:
+      return E;
+    }
+  }
+  return nullptr;
+}
+
+const Expr *definitionValue(const Definition &Def,
+                            const ParentMapAnalysis &PM) {
+  if (!Def.syntax())
+    return nullptr;
+
+  const Node *BindingNode = PM.upTo(*Def.syntax(), Node::NK_Binding);
+  if (!BindingNode)
+    return nullptr;
+
+  const auto &Binding = static_cast<const nixf::Binding &>(*BindingNode);
+  return Binding.value().get();
+}
+
+std::optional<std::string> readFile(const std::string &Path) {
+  std::ifstream File(Path);
+  if (!File)
+    return std::nullopt;
+
+  std::ostringstream Buffer;
+  Buffer << File.rdbuf();
+  return Buffer.str();
+}
+
+struct AnalyzedFile {
+  std::string File;
+  std::string Src;
+  std::vector<nixf::Diagnostic> Diagnostics;
+  std::shared_ptr<Node> AST;
+  ParentMapAnalysis PM;
+};
+
+std::optional<AnalyzedFile> analyzeFile(const std::string &File) {
+  std::optional<std::string> Src = readFile(File);
+  if (!Src)
+    return std::nullopt;
+
+  AnalyzedFile Analyzed{
+      .File = File,
+      .Src = std::move(*Src),
+  };
+  Analyzed.AST = parse(Analyzed.Src, Analyzed.Diagnostics);
+  if (!Analyzed.AST)
+    return std::nullopt;
+
+  Analyzed.PM.runOnAST(*Analyzed.AST);
+  return Analyzed;
+}
+
+std::optional<std::string> importedFile(const Expr &Value,
+                                        const std::string &BaseFile) {
+  const Expr *E = ignoreParens(&Value);
+  if (!E || E->kind() != Node::NK_ExprCall)
+    return std::nullopt;
+
+  const auto &Call = static_cast<const ExprCall &>(*E);
+  const Expr *Fn = ignoreParens(&Call.fn());
+  if (!Fn || Fn->kind() != Node::NK_ExprVar)
+    return std::nullopt;
+
+  const auto &FnVar = static_cast<const ExprVar &>(*Fn);
+  if (FnVar.id().name() != "import")
+    return std::nullopt;
+
+  if (Call.args().empty())
+    return std::nullopt;
+
+  const Expr *PathArg = ignoreParens(Call.args().front().get());
+  if (!PathArg || PathArg->kind() != Node::NK_ExprPath)
+    return std::nullopt;
+
+  const auto &Path = static_cast<const ExprPath &>(*PathArg);
+  if (!Path.parts().isLiteral())
+    return std::nullopt;
+
+  return resolveExprPath(BaseFile, Path.parts().literal());
+}
+
+std::optional<std::size_t> selectedAttrPathLength(const ExprSelect &Sel,
+                                                  const Node &Target,
+                                                  const ParentMapAnalysis &PM) {
+  if (!Sel.path())
+    return std::nullopt;
+
+  const Node *UpAttrName = PM.upTo(Target, Node::NK_AttrName);
+  if (!UpAttrName)
+    return std::nullopt;
+
+  const Node *UpAttrPath = PM.query(*UpAttrName);
+  if (UpAttrPath != Sel.path())
+    return std::nullopt;
+
+  const auto &Names = Sel.path()->names();
+  for (std::size_t Index = 0; Index < Names.size(); ++Index) {
+    if (Names[Index].get() == UpAttrName)
+      return Index + 1;
+  }
+
+  return std::nullopt;
+}
+
+const AttrName *selectedAttrName(const ExprSelect &Sel, const Node &Target,
+                                 const ParentMapAnalysis &PM) {
+  if (!Sel.path())
+    return nullptr;
+
+  const Node *UpAttrName = PM.upTo(Target, Node::NK_AttrName);
+  if (!UpAttrName)
+    return nullptr;
+
+  if (PM.query(*UpAttrName) != Sel.path())
+    return nullptr;
+
+  return static_cast<const AttrName *>(UpAttrName);
+}
+
+std::optional<std::string>
+previewAttrPathInExpr(const AttrPath &Path, const Expr &Root,
+                      const ParentMapAnalysis &PM, llvm::StringRef Src,
+                      std::optional<std::size_t> Limit,
+                      std::size_t StartIndex = 0) {
+  const Expr *Current = &Root;
+  const auto &Names = Path.names();
+  const std::size_t EndIndex = Limit.value_or(Names.size());
+
+  for (std::size_t Index = StartIndex; Index < EndIndex; ++Index) {
+    const auto &Name = Names[Index];
+    if (!Name->isStatic())
+      return std::nullopt;
+
+    Current = returnedExpr(Current);
+    if (!Current || Current->kind() != Node::NK_ExprAttrs)
+      return std::nullopt;
+
+    const auto &Attrs = static_cast<const ExprAttrs &>(*Current);
+    const auto &StaticAttrs = Attrs.sema().staticAttrs();
+    auto It = StaticAttrs.find(Name->staticName());
+    if (It == StaticAttrs.end())
+      return std::nullopt;
+
+    if (Index == EndIndex - 1)
+      return previewSource(*keyPreviewNode(It->second.key(), PM), Src);
+
+    Current = It->second.value();
+    if (!Current)
+      return std::nullopt;
+  }
+
+  return std::nullopt;
+}
+
+std::optional<std::string> previewImportedSelect(const ExprSelect &Sel,
+                                                 const Definition &Def,
+                                                 const ParentMapAnalysis &PM,
+                                                 llvm::StringRef Src,
+                                                 const std::string &BaseFile,
+                                                 std::size_t Limit) {
+  if (!Sel.path())
+    return std::nullopt;
+
+  const Expr *Value = definitionValue(Def, PM);
+  if (!Value)
+    return std::nullopt;
+
+  if (std::optional<std::string> ImportedPath = importedFile(*Value, BaseFile)) {
+    std::optional<AnalyzedFile> Imported = analyzeFile(*ImportedPath);
+    if (!Imported)
+      return std::nullopt;
+
+    return previewAttrPathInExpr(
+        *Sel.path(), *static_cast<const Expr *>(Imported->AST.get()),
+        Imported->PM, Imported->Src, Limit);
+  }
+
+  return previewAttrPathInExpr(*Sel.path(), *Value, PM, Src, Limit);
+}
+
+std::optional<Hover> hoverStaticPreview(const Node &RangeNode,
+                                        const Node &Preview,
+                                        llvm::StringRef Src) {
+  return Hover{
+      .contents =
+          MarkupContent{
+              .kind = MarkupKind::Markdown,
+              .value = fencedPreview(Preview, Src),
+          },
+      .range = toLSPRange(Src, RangeNode.range()),
+  };
+}
+
+std::optional<Hover> hoverVarStatic(const ExprVar &Var,
+                                    const VariableLookupAnalysis &VLA,
+                                    const ParentMapAnalysis &PM,
+                                    llvm::StringRef Src) {
+  try {
+    const Definition &Def = findDefinition(Var, PM, VLA);
+    if (Def.source() == Definition::DS_Builtin ||
+        Def.source() == Definition::DS_With)
+      return std::nullopt;
+
+    const Node *Preview = definitionPreviewNode(Def, PM);
+    if (!Preview)
+      return std::nullopt;
+
+    return hoverStaticPreview(Var, *Preview, Src);
+  } catch (std::exception &E) {
+    elog("hover/static: {0}", E.what());
+  }
+  return std::nullopt;
+}
+
+std::optional<Hover> hoverSelectStatic(const ExprSelect &Sel,
+                                       const Node &Target,
+                                       const VariableLookupAnalysis &VLA,
+                                       const ParentMapAnalysis &PM,
+                                       llvm::StringRef Src,
+                                       const std::string &BaseFile) {
+  try {
+    if (Sel.expr().kind() != Node::NK_ExprVar)
+      return std::nullopt;
+
+    std::optional<std::size_t> Limit = selectedAttrPathLength(Sel, Target, PM);
+    if (!Limit)
+      return std::nullopt;
+
+    const AttrName *RangeNode = selectedAttrName(Sel, Target, PM);
+    if (!RangeNode)
+      return std::nullopt;
+
+    const Definition &Def = findDefinition(Sel.expr(), PM, VLA);
+    if (Def.source() == Definition::DS_Builtin ||
+        Def.source() == Definition::DS_With)
+      return std::nullopt;
+
+    std::optional<std::string> Snippet =
+        previewImportedSelect(Sel, Def, PM, Src, BaseFile, *Limit);
+    if (!Snippet)
+      return std::nullopt;
+
+    std::string Docs;
+    Docs.reserve(Snippet->size() + 10);
+    Docs += "```nix\n";
+    Docs += *Snippet;
+    Docs += "\n```";
+
+    return Hover{
+        .contents =
+            MarkupContent{
+                .kind = MarkupKind::Markdown,
+                .value = std::move(Docs),
+            },
+        .range = toLSPRange(Src, RangeNode->range()),
+    };
+  } catch (std::exception &E) {
+    elog("hover/static/select: {0}", E.what());
+  }
+  return std::nullopt;
+}
+
 } // namespace
 
 void Controller::onHover(const TextDocumentPositionParams &Params,
@@ -225,11 +577,15 @@ void Controller::onHover(const TextDocumentPositionParams &Params,
           const auto &Var = static_cast<const ExprVar &>(UpExpr);
           if (auto H = hoverVar(Var, VLA, PM, *Client, TU->src()))
             return *H;
+          if (auto H = hoverVarStatic(Var, VLA, PM, TU->src()))
+            return *H;
           break;
         }
         case Node::NK_ExprSelect: {
           const auto &Sel = static_cast<const ExprSelect &>(UpExpr);
           if (auto H = hoverSelect(Sel, VLA, PM, *Client, TU->src()))
+            return *H;
+          if (auto H = hoverSelectStatic(Sel, N, VLA, PM, TU->src(), File))
             return *H;
           break;
         }
@@ -260,6 +616,23 @@ void Controller::onHover(const TextDocumentPositionParams &Params,
               };
             }
           }
+          break;
+        }
+        default:
+          break;
+        }
+      } else {
+        switch (UpExpr.kind()) {
+        case Node::NK_ExprVar: {
+          const auto &Var = static_cast<const ExprVar &>(UpExpr);
+          if (auto H = hoverVarStatic(Var, VLA, PM, TU->src()))
+            return *H;
+          break;
+        }
+        case Node::NK_ExprSelect: {
+          const auto &Sel = static_cast<const ExprSelect &>(UpExpr);
+          if (auto H = hoverSelectStatic(Sel, N, VLA, PM, TU->src(), File))
+            return *H;
           break;
         }
         default:
