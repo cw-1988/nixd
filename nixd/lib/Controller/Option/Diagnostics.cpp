@@ -149,6 +149,21 @@ bool isNestedInConfigWrapper(const Binding &Bind,
   return false;
 }
 
+bool isNestedInFunctionCall(const Binding &Binding,
+                            const ParentMapAnalysis &PM) {
+  const Node *Current = &Binding;
+  std::unordered_set<const Node *> Seen;
+  while (Current && Seen.insert(Current).second) {
+    const Node *Parent = PM.query(*Current);
+    if (!Parent)
+      return false;
+    if (Parent->kind() == Node::NK_ExprCall)
+      return true;
+    Current = Parent;
+  }
+  return false;
+}
+
 bool hasFunctionValue(const Binding &Binding) {
   const auto &Value = Binding.value();
   return Value && stripParens(*Value).kind() == Node::NK_ExprLambda;
@@ -336,6 +351,8 @@ validateOptionBinding(const Binding &Binding, const ParentMapAnalysis &PM,
   if (isNestedInList(Binding, PM))
     return {};
   if (isNestedInConfigWrapper(Binding, PM))
+    return {};
+  if (isNestedInFunctionCall(Binding, PM))
     return {};
 
   std::optional<std::vector<std::string>> Scope =
