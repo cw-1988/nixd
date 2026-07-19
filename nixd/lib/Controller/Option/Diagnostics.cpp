@@ -149,6 +149,58 @@ bool isNestedInConfigWrapper(const Binding &Bind,
   return false;
 }
 
+bool hasFunctionValue(const Binding &Binding) {
+  const auto &Value = Binding.value();
+  return Value && stripParens(*Value).kind() == Node::NK_ExprLambda;
+}
+
+std::optional<std::string> singleStaticBindingName(const Binding &Binding) {
+  const auto &Names = Binding.path().names();
+  if (Names.size() != 1 || !Names.front() || !Names.front()->isStatic())
+    return std::nullopt;
+  return Names.front()->staticName();
+}
+
+bool hasFunctionHelperExport(const ExprAttrs &Attrs) {
+  for (const auto &[Name, Attr] : Attrs.sema().staticAttrs()) {
+    if (!Name.starts_with("mk") || !Attr.value())
+      continue;
+    if (stripParens(*Attr.value()).kind() == Node::NK_ExprLambda)
+      return true;
+  }
+  return false;
+}
+
+bool isKnownRootOptionField(
+    std::string_view Name, OptionDiagnosticContext &Context,
+    const std::function<std::vector<ResolvedOptionField>(
+        const std::vector<std::string> &, const std::string &)> &Complete) {
+  std::vector<ResolvedOptionField> Fields =
+      completeCached(Context, {}, "", Complete);
+  for (const ResolvedOptionField &Field : Fields)
+    if (Field.Field.Name == Name)
+      return true;
+  return false;
+}
+
+bool isHelperLibraryExport(
+    const Binding &Binding, const ParentMapAnalysis &PM,
+    OptionDiagnosticContext &Context,
+    const std::function<std::vector<ResolvedOptionField>(
+        const std::vector<std::string> &, const std::string &)> &Complete) {
+  std::optional<std::string> Name = singleStaticBindingName(Binding);
+  if (!Name)
+    return false;
+
+  const Node *AttrsNode = PM.upTo(Binding, Node::NK_ExprAttrs);
+  if (!AttrsNode)
+    return false;
+
+  const auto &Attrs = static_cast<const ExprAttrs &>(*AttrsNode);
+  return hasFunctionHelperExport(Attrs) &&
+         !isKnownRootOptionField(*Name, Context, Complete);
+}
+
 std::optional<std::vector<std::string>>
 enclosingBindingScope(const Binding &Bind, const ParentMapAnalysis &PM) {
   const Node *Current = &Bind;
@@ -295,6 +347,9 @@ validateOptionBinding(const Binding &Binding, const ParentMapAnalysis &PM,
       resolveCached(Context, *Scope, Resolve);
 
   if (Infos.empty()) {
+    if (hasFunctionValue(Binding) ||
+        isHelperLibraryExport(Binding, PM, Context, Complete))
+      return {};
     if (std::optional<NixdDiagnostic> Unknown = validateKnownOptionPath(
             Binding, PM, *Scope, Context, Resolve, Complete))
       return {*Unknown};
@@ -333,11 +388,14 @@ void collectOptionDiagnosticsFromNode(
     return;
 
   if (Desc.kind() == Node::NK_Binding) {
+    const auto &Binding = static_cast<const nixf::Binding &>(Desc);
     std::vector<NixdDiagnostic> NewDiagnostics = validateOptionBinding(
-        static_cast<const Binding &>(Desc), PM, VLA, Context, Resolve,
-        Complete);
+        Binding, PM, VLA, Context, Resolve, Complete);
     std::move(NewDiagnostics.begin(), NewDiagnostics.end(),
               std::back_inserter(Diagnostics));
+    if (hasFunctionValue(Binding) ||
+        isHelperLibraryExport(Binding, PM, Context, Complete))
+      return;
   }
 
   for (const nixf::Node *Child : Desc.children()) {
