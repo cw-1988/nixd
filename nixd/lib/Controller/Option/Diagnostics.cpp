@@ -1,6 +1,6 @@
 #include "DiagnosticsSupport.h"
-#include "Validation.h"
 #include "Navigation.h"
+#include "Validation.h"
 #include "nixd/Controller/Controller.h"
 #include "nixd/Controller/Option.h"
 
@@ -40,10 +40,11 @@ struct OptionDiagnosticContext {
   bool QueryLimitReached = false;
 };
 
-std::vector<ResolvedOptionInfo> resolveCached(
-    OptionDiagnosticContext &Context, const std::vector<std::string> &Scope,
-    const std::function<std::vector<ResolvedOptionInfo>(
-        const std::vector<std::string> &)> &Resolve) {
+std::vector<ResolvedOptionInfo>
+resolveCached(OptionDiagnosticContext &Context,
+              const std::vector<std::string> &Scope,
+              const std::function<std::vector<ResolvedOptionInfo>(
+                  const std::vector<std::string> &)> &Resolve) {
   auto [It, Inserted] = Context.InfoCache.try_emplace(Scope);
   if (Inserted) {
     if (Context.Queries >= MaxOptionDiagnosticQueries) {
@@ -129,8 +130,7 @@ bool hasEnclosingBinding(const Binding &Bind, const ParentMapAnalysis &PM) {
   return false;
 }
 
-bool isNestedInConfigWrapper(const Binding &Bind,
-                             const ParentMapAnalysis &PM) {
+bool isNestedInConfigWrapper(const Binding &Bind, const ParentMapAnalysis &PM) {
   const Node *Current = &Bind;
   std::unordered_set<const Node *> Seen;
   while (Current && Seen.insert(Current).second) {
@@ -174,6 +174,43 @@ std::optional<std::string> singleStaticBindingName(const Binding &Binding) {
   if (Names.size() != 1 || !Names.front() || !Names.front()->isStatic())
     return std::nullopt;
   return Names.front()->staticName();
+}
+
+std::optional<std::string> firstStaticBindingName(const Binding &Binding) {
+  const auto &Names = Binding.path().names();
+  if (Names.empty() || !Names.front() || !Names.front()->isStatic())
+    return std::nullopt;
+  return Names.front()->staticName();
+}
+
+const ExprAttrs *parentAttrs(const Binding &Binding,
+                             const ParentMapAnalysis &PM) {
+  const Node *Binds = PM.query(Binding);
+  if (!Binds || Binds->kind() != Node::NK_Binds)
+    return nullptr;
+  const Node *Attrs = PM.query(*Binds);
+  if (!Attrs || Attrs->kind() != Node::NK_ExprAttrs)
+    return nullptr;
+  return static_cast<const ExprAttrs *>(Attrs);
+}
+
+bool isFlakeRootAttrs(const ExprAttrs &Attrs, const ParentMapAnalysis &PM) {
+  if (!PM.isRoot(Attrs))
+    return false;
+  return Attrs.sema().staticAttrs().contains("outputs");
+}
+
+bool isFlakeRootBinding(const Binding &Binding, const ParentMapAnalysis &PM) {
+  const ExprAttrs *Attrs = parentAttrs(Binding, PM);
+  if (!Attrs || !isFlakeRootAttrs(*Attrs, PM))
+    return false;
+
+  std::optional<std::string> Name = firstStaticBindingName(Binding);
+  if (!Name)
+    return false;
+
+  return *Name == "description" || *Name == "inputs" || *Name == "outputs" ||
+         *Name == "nixConfig";
 }
 
 bool hasFunctionHelperExport(const ExprAttrs &Attrs) {
@@ -244,8 +281,7 @@ bool isListContainerType(const OptionType &Type) {
       option_navigation::isNonEmptyListType(Type))
     return true;
   if (LowerName == "nullor") {
-    if (std::optional<OptionType> Elem =
-            option_navigation::nullOrTypeFor(Type))
+    if (std::optional<OptionType> Elem = option_navigation::nullOrTypeFor(Type))
       return isListContainerType(*Elem);
   }
   if (LowerName == "unique") {
@@ -256,6 +292,27 @@ bool isListContainerType(const OptionType &Type) {
   for (const OptionType &Alternative :
        option_navigation::alternativeTypesFor(Type, LowerName)) {
     if (isListContainerType(Alternative))
+      return true;
+  }
+  return false;
+}
+
+bool parentFieldHasDynamicAttrCoverage(
+    OptionDiagnosticContext &Context, const std::vector<std::string> &Scope,
+    const std::function<std::vector<ResolvedOptionField>(
+        const std::vector<std::string> &, const std::string &)> &Complete) {
+  if (Scope.empty())
+    return false;
+
+  std::vector<std::string> Parent(Scope.begin(), Scope.end() - 1);
+  const std::string &Leaf = Scope.back();
+  for (const ResolvedOptionField &Field :
+       completeCached(Context, Parent, Leaf, Complete)) {
+    if (Field.Field.Name != Leaf || !Field.Field.Description ||
+        !Field.Field.Description->Type)
+      continue;
+    if (option_navigation::hasDynamicAttrCoverage(
+            *Field.Field.Description->Type))
       return true;
   }
   return false;
@@ -295,6 +352,8 @@ std::optional<NixdDiagnostic> validateKnownOptionPath(
           option_navigation::hasDynamicAttrCoverage(*Info.Description.Type))
         return std::nullopt;
     }
+    if (parentFieldHasDynamicAttrCoverage(Context, Prefix, Complete))
+      return std::nullopt;
     if (Context.QueryLimitReached)
       return std::nullopt;
   }
@@ -334,17 +393,17 @@ std::optional<NixdDiagnostic> validateKnownOptionPath(
   return makeUnknownDiagnostic(Binding.path(), Scope);
 }
 
-std::vector<NixdDiagnostic>
-validateOptionBinding(const Binding &Binding, const ParentMapAnalysis &PM,
-                      const VariableLookupAnalysis *VLA,
-                      OptionDiagnosticContext &Context,
-                      const std::function<std::vector<ResolvedOptionInfo>(
-                          const std::vector<std::string> &)> &Resolve,
-                      const std::function<std::vector<ResolvedOptionField>(
-                          const std::vector<std::string> &,
-                          const std::string &)> &Complete) {
+std::vector<NixdDiagnostic> validateOptionBinding(
+    const Binding &Binding, const ParentMapAnalysis &PM,
+    const VariableLookupAnalysis *VLA, OptionDiagnosticContext &Context,
+    const std::function<std::vector<ResolvedOptionInfo>(
+        const std::vector<std::string> &)> &Resolve,
+    const std::function<std::vector<ResolvedOptionField>(
+        const std::vector<std::string> &, const std::string &)> &Complete) {
   const auto &Value = Binding.value();
   if (!Value)
+    return {};
+  if (isFlakeRootBinding(Binding, PM))
     return {};
   if (isLetDefinitionBinding(Binding, PM))
     return {};
@@ -406,8 +465,8 @@ void collectOptionDiagnosticsFromNode(
 
   if (Desc.kind() == Node::NK_Binding) {
     const auto &Binding = static_cast<const nixf::Binding &>(Desc);
-    std::vector<NixdDiagnostic> NewDiagnostics = validateOptionBinding(
-        Binding, PM, VLA, Context, Resolve, Complete);
+    std::vector<NixdDiagnostic> NewDiagnostics =
+        validateOptionBinding(Binding, PM, VLA, Context, Resolve, Complete);
     std::move(NewDiagnostics.begin(), NewDiagnostics.end(),
               std::back_inserter(Diagnostics));
     if (hasFunctionValue(Binding) ||
@@ -418,8 +477,7 @@ void collectOptionDiagnosticsFromNode(
   for (const nixf::Node *Child : Desc.children()) {
     if (Child)
       collectOptionDiagnosticsFromNode(*Child, PM, VLA, Context, Resolve,
-                                       Complete, Seen,
-                                       Diagnostics);
+                                       Complete, Seen, Diagnostics);
   }
 }
 
