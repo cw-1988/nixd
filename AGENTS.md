@@ -32,3 +32,11 @@ For the infra-test workspace, NixIDE should point at:
 ```text
 /home/nixos/projects/nixd/build/nixd/tools/nixd
 ```
+
+## Implementation guardrails
+
+Do not hardcode one-off option names, paths, or project-specific values to fix
+completion or diagnostics. Prefer deriving data from the relevant schema,
+provider, evaluator, or source of truth; if that source is missing, fix the
+source integration or leave the behavior unsupported rather than adding a
+special-case literal.
