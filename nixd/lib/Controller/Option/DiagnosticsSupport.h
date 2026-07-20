@@ -33,8 +33,12 @@ bool literalNull(const nixf::Expr &Value);
 std::optional<std::string> pathLiteralText(const nixf::Expr &Value);
 
 bool hasInheritBinding(const nixf::ExprAttrs &Attrs);
+bool hasModuleImports(const nixf::ExprAttrs &Attrs);
 bool isLetDefinitionBinding(const nixf::Binding &Binding,
                             const nixf::ParentMapAnalysis &PM);
+bool isModuleImportKey(std::string_view Name);
+bool isModuleConfigKey(std::string_view Name);
+bool isModuleFrameworkKey(std::string_view Name);
 
 NixdDiagnostic makeTypeDiagnostic(const nixf::Expr &Value,
                                   const std::vector<std::string> &Scope,

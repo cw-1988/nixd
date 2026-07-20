@@ -59,7 +59,13 @@ rec {
 
 ```
 CHECK: "id": 0
-CHECK: "message": "unknown option `services.example.typo`"
+CHECK: "code": "option-unknown"
+CHECK-NEXT: "message": "unknown option `services.example.typo`"
+CHECK: "severity": 4
+CHECK-NEXT: "source": "nixd"
+CHECK-NEXT: "tags": [
+CHECK-NEXT: 1
+CHECK-NEXT: ]
 ```
 
 ```json

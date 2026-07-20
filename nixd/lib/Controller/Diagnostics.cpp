@@ -127,6 +127,7 @@ void Controller::publishDiagnostics(
         .code = D.Code,
         .source = D.Source,
         .message = D.Message,
+        .tags = toLSPTags(D.Tags),
     });
   }
   PublishDiagnostic({

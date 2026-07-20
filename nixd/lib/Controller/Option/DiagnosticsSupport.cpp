@@ -163,6 +163,10 @@ bool option_diagnostics::hasInheritBinding(const ExprAttrs &Attrs) {
   return false;
 }
 
+bool option_diagnostics::hasModuleImports(const ExprAttrs &Attrs) {
+  return Attrs.sema().staticAttrs().contains("imports");
+}
+
 bool option_diagnostics::isLetDefinitionBinding(const Binding &Binding,
                                                 const ParentMapAnalysis &PM) {
   const Node *AttrsNode = PM.upTo(Binding, Node::NK_ExprAttrs);
@@ -172,6 +176,19 @@ bool option_diagnostics::isLetDefinitionBinding(const Binding &Binding,
   if (!Parent || Parent->kind() != Node::NK_ExprLet)
     return false;
   return static_cast<const ExprLet &>(*Parent).attrs() == AttrsNode;
+}
+
+bool option_diagnostics::isModuleImportKey(std::string_view Name) {
+  return Name == "imports";
+}
+
+bool option_diagnostics::isModuleConfigKey(std::string_view Name) {
+  return Name == "config";
+}
+
+bool option_diagnostics::isModuleFrameworkKey(std::string_view Name) {
+  return isModuleImportKey(Name) || Name == "options" ||
+         Name == "disabledModules" || Name == "_module" || Name == "meta";
 }
 
 NixdDiagnostic option_diagnostics::makeTypeDiagnostic(
@@ -192,10 +209,11 @@ NixdDiagnostic option_diagnostics::makeUnknownDiagnostic(
     const Node &Key, const std::vector<std::string> &Scope) {
   return NixdDiagnostic{
       .Range = Key.range(),
-      .Severity = NixdDiagnosticSeverity::Error,
+      .Severity = NixdDiagnosticSeverity::Hint,
       .Code = "option-unknown",
       .Source = "nixd",
       .Message = "unknown option `" + renderScope(Scope) + "`",
+      .Tags = {nixf::DiagnosticTag::Faded},
   };
 }
 

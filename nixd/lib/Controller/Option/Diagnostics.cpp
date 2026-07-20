@@ -176,13 +176,6 @@ std::optional<std::string> singleStaticBindingName(const Binding &Binding) {
   return Names.front()->staticName();
 }
 
-std::optional<std::string> firstStaticBindingName(const Binding &Binding) {
-  const auto &Names = Binding.path().names();
-  if (Names.empty() || !Names.front() || !Names.front()->isStatic())
-    return std::nullopt;
-  return Names.front()->staticName();
-}
-
 const ExprAttrs *parentAttrs(const Binding &Binding,
                              const ParentMapAnalysis &PM) {
   const Node *Binds = PM.query(Binding);
@@ -194,23 +187,20 @@ const ExprAttrs *parentAttrs(const Binding &Binding,
   return static_cast<const ExprAttrs *>(Attrs);
 }
 
-bool isFlakeRootAttrs(const ExprAttrs &Attrs, const ParentMapAnalysis &PM) {
-  if (!PM.isRoot(Attrs))
-    return false;
+bool hasFlakeOutputsKey(const ExprAttrs &Attrs) {
   return Attrs.sema().staticAttrs().contains("outputs");
 }
 
-bool isFlakeRootBinding(const Binding &Binding, const ParentMapAnalysis &PM) {
+bool isFlakeRootAttrs(const ExprAttrs &Attrs, const ParentMapAnalysis &PM) {
+  if (!PM.isRoot(Attrs))
+    return false;
+  return hasFlakeOutputsKey(Attrs);
+}
+
+bool isDirectFlakeRootBinding(const Binding &Binding,
+                              const ParentMapAnalysis &PM) {
   const ExprAttrs *Attrs = parentAttrs(Binding, PM);
-  if (!Attrs || !isFlakeRootAttrs(*Attrs, PM))
-    return false;
-
-  std::optional<std::string> Name = firstStaticBindingName(Binding);
-  if (!Name)
-    return false;
-
-  return *Name == "description" || *Name == "inputs" || *Name == "outputs" ||
-         *Name == "nixConfig";
+  return Attrs && isFlakeRootAttrs(*Attrs, PM);
 }
 
 bool hasFunctionHelperExport(const ExprAttrs &Attrs) {
@@ -325,7 +315,7 @@ std::optional<NixdDiagnostic> validateKnownOptionPath(
         const std::vector<std::string> &)> &Resolve,
     const std::function<std::vector<ResolvedOptionField>(
         const std::vector<std::string> &, const std::string &)> &Complete) {
-  if (Scope.empty() || Scope.back() == "imports" ||
+  if (Scope.empty() || isModuleImportKey(Scope.back()) ||
       hasUnsafeAncestorAttrs(Binding, PM))
     return std::nullopt;
 
@@ -403,8 +393,6 @@ std::vector<NixdDiagnostic> validateOptionBinding(
   const auto &Value = Binding.value();
   if (!Value)
     return {};
-  if (isFlakeRootBinding(Binding, PM))
-    return {};
   if (isLetDefinitionBinding(Binding, PM))
     return {};
   if (isNestedInList(Binding, PM))
@@ -465,6 +453,8 @@ void collectOptionDiagnosticsFromNode(
 
   if (Desc.kind() == Node::NK_Binding) {
     const auto &Binding = static_cast<const nixf::Binding &>(Desc);
+    if (isDirectFlakeRootBinding(Binding, PM))
+      return;
     std::vector<NixdDiagnostic> NewDiagnostics =
         validateOptionBinding(Binding, PM, VLA, Context, Resolve, Complete);
     std::move(NewDiagnostics.begin(), NewDiagnostics.end(),

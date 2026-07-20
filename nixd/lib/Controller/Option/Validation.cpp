@@ -203,8 +203,7 @@ void validateRequiredSubOptions(const OptionType &Type, const ExprAttrs &Attrs,
   if (!Type.KnownSubOptionsComplete)
     return;
   if (Attrs.sema().isRecursive() || !Attrs.sema().dynamicAttrs().empty() ||
-      hasInheritBinding(Attrs) ||
-      Attrs.sema().staticAttrs().contains("imports"))
+      hasInheritBinding(Attrs) || hasModuleImports(Attrs))
     return;
 
   for (const auto &[Name, Summary] : Type.KnownSubOptions) {
@@ -229,17 +228,15 @@ ValidationResult validateSubmoduleAttrset(const OptionType &Type,
       Type.KnownSubOptionsComplete &&
       (!Type.NestedTypes.empty() || !Type.KnownSubOptions.empty()) &&
       !Attrs.sema().isRecursive() && Attrs.sema().dynamicAttrs().empty() &&
-      !hasInheritBinding(Attrs) &&
-      !Attrs.sema().staticAttrs().contains("imports");
+      !hasInheritBinding(Attrs) && !hasModuleImports(Attrs);
 
   for (const auto &[Name, Attr] : Attrs.sema().staticAttrs()) {
     if (!Attr.value())
       continue;
-    if (Name == "imports" || Name == "options" || Name == "disabledModules" ||
-        Name == "_module" || Name == "meta")
+    if (isModuleFrameworkKey(Name))
       continue;
 
-    if (Name == "config" &&
+    if (isModuleConfigKey(Name) &&
         stripParens(*Attr.value()).kind() == Node::NK_ExprAttrs) {
       HasConfigAttrset = true;
       ValidationResult Config = validateSubmoduleAttrset(

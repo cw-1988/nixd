@@ -28,6 +28,7 @@ struct NixdDiagnostic {
   std::string Code;
   std::string Source;
   std::string Message;
+  std::vector<nixf::DiagnosticTag> Tags;
 };
 
 /// \brief Holds analyzed information about a document.
