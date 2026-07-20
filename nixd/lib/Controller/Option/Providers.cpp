@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <optional>
 #include <semaphore>
@@ -61,10 +62,6 @@ std::vector<ResolvedOptionField> fieldsFromType(std::string_view ProviderName,
                                                 const OptionType &Type,
                                                 const std::string &Prefix);
 
-bool isNixSettingsScope(const std::vector<std::string> &Scope) {
-  return Scope.size() == 2 && Scope[0] == "nix" && Scope[1] == "settings";
-}
-
 bool hasField(const std::vector<ResolvedOptionField> &Fields,
               std::string_view Name) {
   return std::any_of(Fields.begin(), Fields.end(),
@@ -73,15 +70,36 @@ bool hasField(const std::vector<ResolvedOptionField> &Fields,
                      });
 }
 
-void appendNixSettingsFieldsFromGlobalConfig(
-    std::vector<ResolvedOptionField> &Fields,
-    const std::vector<OptionProviderRef> &Providers,
-    const std::vector<std::string> &Scope, const std::string &Prefix) {
-  if (!isNixSettingsScope(Scope))
-    return;
+using NixSettingMap = std::map<std::string, nix::AbstractConfig::SettingInfo>;
 
-  std::map<std::string, nix::AbstractConfig::SettingInfo> Settings;
+NixSettingMap globalConfigSettings() {
+  NixSettingMap Settings;
   nix::globalConfig.getSettings(Settings);
+  return Settings;
+}
+
+bool hasGlobalConfigSettingEvidence(
+    const std::vector<ResolvedOptionField> &Fields,
+    const NixSettingMap &Settings) {
+  int Matches = 0;
+  for (const ResolvedOptionField &Field : Fields) {
+    if (Settings.contains(Field.Field.Name))
+      ++Matches;
+    if (Matches >= 2)
+      return true;
+  }
+  return false;
+}
+
+void appendGlobalConfigSettings(
+    std::vector<ResolvedOptionField> &Fields,
+    const std::vector<ResolvedOptionField> &Evidence,
+    const std::vector<OptionProviderRef> &Providers,
+    const std::string &Prefix) {
+  NixSettingMap Settings = globalConfigSettings();
+
+  if (!hasGlobalConfigSettingEvidence(Evidence, Settings))
+    return;
 
   const std::string ProviderName =
       Providers.empty() ? "nixos" : Providers.front().Name;
@@ -272,7 +290,9 @@ OptionService::completeDerived(const std::vector<OptionProviderRef> &Providers,
                                const std::vector<std::string> &Scope,
                                const std::string &Prefix) {
   std::vector<ResolvedOptionField> Fields = complete(Providers, Scope, Prefix);
-  appendNixSettingsFieldsFromGlobalConfig(Fields, Providers, Scope, Prefix);
+  std::vector<ResolvedOptionField> Evidence =
+      Prefix.empty() ? Fields : complete(Providers, Scope, "");
+  appendGlobalConfigSettings(Fields, Evidence, Providers, Prefix);
   if (!Fields.empty())
     return Fields;
 
