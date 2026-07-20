@@ -1,9 +1,11 @@
-#include "nixd/Controller/Controller.h"
 #include "Navigation.h"
+#include "nixd/Controller/Controller.h"
 
 #include <boost/asio/post.hpp>
 
 #include <llvm/Support/Error.h>
+
+#include <nix/util/config-global.hh>
 
 #include <algorithm>
 #include <cctype>
@@ -58,6 +60,46 @@ deriveTypeFromResolvedInfo(const ResolvedOptionInfo &Info,
 std::vector<ResolvedOptionField> fieldsFromType(std::string_view ProviderName,
                                                 const OptionType &Type,
                                                 const std::string &Prefix);
+
+bool isNixSettingsScope(const std::vector<std::string> &Scope) {
+  return Scope.size() == 2 && Scope[0] == "nix" && Scope[1] == "settings";
+}
+
+bool hasField(const std::vector<ResolvedOptionField> &Fields,
+              std::string_view Name) {
+  return std::any_of(Fields.begin(), Fields.end(),
+                     [&](const ResolvedOptionField &Field) {
+                       return Field.Field.Name == Name;
+                     });
+}
+
+void appendNixSettingsFieldsFromGlobalConfig(
+    std::vector<ResolvedOptionField> &Fields,
+    const std::vector<OptionProviderRef> &Providers,
+    const std::vector<std::string> &Scope, const std::string &Prefix) {
+  if (!isNixSettingsScope(Scope))
+    return;
+
+  std::map<std::string, nix::AbstractConfig::SettingInfo> Settings;
+  nix::globalConfig.getSettings(Settings);
+
+  const std::string ProviderName =
+      Providers.empty() ? "nixos" : Providers.front().Name;
+  for (const auto &[Name, Info] : Settings) {
+    if (!Name.starts_with(Prefix) || hasField(Fields, Name))
+      continue;
+
+    OptionField Field;
+    Field.Name = Name;
+
+    OptionDescription Desc;
+    Desc.Description = Info.description;
+    Field.Description = std::move(Desc);
+
+    Fields.push_back(ResolvedOptionField{.ProviderName = ProviderName,
+                                         .Field = std::move(Field)});
+  }
+}
 
 void appendFieldsFromType(std::vector<ResolvedOptionField> &Fields,
                           std::string_view ProviderName, const OptionType &Type,
@@ -171,15 +213,15 @@ OptionService::resolveProviderInfo(const OptionProviderRef &Provider,
   }
 
   auto State = std::make_shared<ProviderInfoReplyState>();
-  auto OnReply = [State, Name = Provider.Name](
-                     llvm::Expected<OptionInfoResponse> Resp) {
-    if (Resp) {
-      State->Desc = *Resp;
-    } else {
-      lspserver::elog("option provider {0}: {1}", Name, Resp.takeError());
-    }
-    State->Ready.release();
-  };
+  auto OnReply =
+      [State, Name = Provider.Name](llvm::Expected<OptionInfoResponse> Resp) {
+        if (Resp) {
+          State->Desc = *Resp;
+        } else {
+          lspserver::elog("option provider {0}: {1}", Name, Resp.takeError());
+        }
+        State->Ready.release();
+      };
 
   Provider.Client->optionInfo(Scope, std::move(OnReply));
   State->Ready.acquire();
@@ -230,6 +272,7 @@ OptionService::completeDerived(const std::vector<OptionProviderRef> &Providers,
                                const std::vector<std::string> &Scope,
                                const std::string &Prefix) {
   std::vector<ResolvedOptionField> Fields = complete(Providers, Scope, Prefix);
+  appendNixSettingsFieldsFromGlobalConfig(Fields, Providers, Scope, Prefix);
   if (!Fields.empty())
     return Fields;
 
