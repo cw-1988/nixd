@@ -54,5 +54,31 @@ CHECK:      "label": "virtualisation",
 ```
 
 ```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "textDocument/completion",
+  "params": {
+    "textDocument": {
+      "uri": "file:///completion-root-empty-namespaces.nix"
+    },
+    "position": {
+      "line": 2,
+      "character": 2
+    },
+    "context": {
+      "triggerKind": 1
+    }
+  }
+}
+```
+
+```
+     CHECK: "id": 2,
+CHECK:      "label": "namespace29",
+CHECK:      "label": "virtualisation",
+```
+
+```json
 {"jsonrpc":"2.0","method":"exit"}
 ```

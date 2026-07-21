@@ -121,8 +121,19 @@ class OptionService {
     bool operator<(const InfoCacheKey &Other) const;
   };
 
+  struct CompleteCacheKey {
+    std::string ProviderName;
+    std::uint64_t Generation = 0;
+    std::vector<std::string> Scope;
+    std::string Prefix;
+    bool FullDescriptions = true;
+
+    bool operator<(const CompleteCacheKey &Other) const;
+  };
+
   std::mutex CacheLock;
   std::map<InfoCacheKey, std::optional<OptionDescription>> InfoCache;
+  std::map<CompleteCacheKey, OptionCompleteResponse> CompleteCache;
 
   std::optional<OptionDescription>
   resolveProviderInfo(const OptionProviderRef &Provider,

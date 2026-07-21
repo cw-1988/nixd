@@ -30,6 +30,7 @@ struct ProviderInfoReplyState {
 struct ProviderCompleteReplyState {
   std::binary_semaphore Ready{0};
   OptionCompleteResponse Names;
+  bool Succeeded = false;
 };
 
 std::optional<OptionType> elemTypeFor(const OptionType &Type,
@@ -203,14 +204,25 @@ bool OptionService::InfoCacheKey::operator<(
          std::tie(Other.ProviderName, Other.Generation, Other.Scope);
 }
 
+bool OptionService::CompleteCacheKey::operator<(
+    const OptionService::CompleteCacheKey &Other) const {
+  return std::tie(ProviderName, Generation, Scope, Prefix, FullDescriptions) <
+         std::tie(Other.ProviderName, Other.Generation, Other.Scope,
+                  Other.Prefix, Other.FullDescriptions);
+}
+
 void OptionService::invalidate() {
   std::lock_guard _(CacheLock);
   InfoCache.clear();
+  CompleteCache.clear();
 }
 
 void OptionService::invalidateProvider(std::string_view ProviderName) {
   std::lock_guard _(CacheLock);
   std::erase_if(InfoCache, [&](const auto &Entry) {
+    return Entry.first.ProviderName == ProviderName;
+  });
+  std::erase_if(CompleteCache, [&](const auto &Entry) {
     return Entry.first.ProviderName == ProviderName;
   });
 }
@@ -260,6 +272,28 @@ OptionService::complete(const std::vector<OptionProviderRef> &Providers,
     if (!Provider.Client)
       continue;
 
+    CompleteCacheKey Key{.ProviderName = Provider.Name,
+                         .Generation = Provider.Generation,
+                         .Scope = Scope,
+                         .Prefix = Prefix,
+                         .FullDescriptions = FullDescriptions};
+    OptionCompleteResponse Names;
+    bool CacheHit = false;
+    {
+      std::lock_guard _(CacheLock);
+      if (auto It = CompleteCache.find(Key); It != CompleteCache.end()) {
+        Names = It->second;
+        CacheHit = true;
+      }
+    }
+
+    if (CacheHit) {
+      for (const OptionField &Field : Names)
+        Fields.push_back(
+            ResolvedOptionField{.ProviderName = Provider.Name, .Field = Field});
+      continue;
+    }
+
     auto State = std::make_shared<ProviderCompleteReplyState>();
     auto OnReply = [State, Name = Provider.Name](
                        llvm::Expected<OptionCompleteResponse> Resp) {
@@ -268,7 +302,8 @@ OptionService::complete(const std::vector<OptionProviderRef> &Providers,
         State->Ready.release();
         return;
       }
-      State->Names = *Resp;
+      State->Names = std::move(*Resp);
+      State->Succeeded = true;
       State->Ready.release();
     };
 
@@ -278,10 +313,15 @@ OptionService::complete(const std::vector<OptionProviderRef> &Providers,
                                     std::move(OnReply));
     State->Ready.acquire();
 
-    for (OptionField &Field : State->Names) {
+    if (State->Succeeded) {
+      std::lock_guard _(CacheLock);
+      CompleteCache.insert_or_assign(std::move(Key), State->Names);
+    }
+
+    for (const OptionField &Field : State->Names) {
       Fields.push_back(ResolvedOptionField{
           .ProviderName = Provider.Name,
-          .Field = std::move(Field),
+          .Field = Field,
       });
     }
   }
