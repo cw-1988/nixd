@@ -22,6 +22,7 @@
 #include <boost/asio/post.hpp>
 
 #include <optional>
+#include <string_view>
 #include <utility>
 
 using namespace nixd;
@@ -29,6 +30,17 @@ using namespace lspserver;
 using namespace nixf;
 
 using completion::ExceedSizeError;
+
+static bool hasDirectAttrSetValue(const OptionValueContext &Context,
+                                  std::string_view Src) {
+  if (!Context.Binding || !Context.Binding->value())
+    return false;
+  const Expr &Value = *Context.Binding->value();
+  if (Value.kind() == Node::NK_ExprAttrs)
+    return true;
+  const size_t Begin = Value.lCur().offset();
+  return Begin < Src.size() && Src[Begin] == '{';
+}
 
 void Controller::onCompletion(const CompletionParams &Params,
                               Callback<CompletionList> Reply) {
@@ -66,12 +78,17 @@ void Controller::onCompletion(const CompletionParams &Params,
                   completion::optionAttrPathCompletionParams(N, PM, Pos,
                                                              TU->src())) {
             // An incomplete name immediately before another binding can make
-            // parser recovery attach the cursor to the root attrset. The
-            // enclosing option value still provides the correct schema scope.
+            // parser recovery attach the cursor to the root attrset. Borrow
+            // the enclosing option scope only when its value starts directly
+            // with an attrset; a nested function argument has no such schema.
             if (Params->Scope.empty() && ValueContext &&
-                !ValueContext->Scope.empty())
-              Params->Scope = ValueContext->Scope;
-            if (waitForOptionProvidersReadyForTests())
+                !ValueContext->Scope.empty()) {
+              if (hasDirectAttrSetValue(*ValueContext, TU->src()))
+                Params->Scope = ValueContext->Scope;
+              else
+                Params.reset();
+            }
+            if (Params && waitForOptionProvidersReadyForTests())
               completion::completeOptionNames(
                   completeDerivedOptions(Params->Scope, Params->Prefix,
                                          /*FullDescriptions=*/false),

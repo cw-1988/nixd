@@ -1,8 +1,13 @@
 #include "Controller/Completion/Options.h"
 
 #include "Controller/AST.h"
+#include "Controller/Completion/Context.h"
 
 #include "lspserver/SourceCode.h"
+
+#include <nixf/Basic/Nodes/Lambda.h>
+#include <nixf/Basic/Nodes/Simple.h>
+#include <nixf/Parse/Parser.h>
 
 #include <llvm/Support/Error.h>
 
@@ -54,8 +59,14 @@ bool isAttrNameChar(char Ch) {
          Ch == '\'' || Ch == '-';
 }
 
-std::optional<std::string> fieldPrefix(const ExprAttrs &Attrs, Position Pos,
-                                       std::string_view Src) {
+struct LineFieldPrefix {
+  std::string Text;
+  size_t Begin = 0;
+  size_t Cursor = 0;
+};
+
+std::optional<LineFieldPrefix> lineFieldPrefix(Position Pos,
+                                               std::string_view Src) {
   lspserver::Position LSPPos{.line = Pos.line(), .character = Pos.column()};
   llvm::Expected<size_t> Offset =
       lspserver::positionToOffset(Src, LSPPos, true);
@@ -80,6 +91,16 @@ std::optional<std::string> fieldPrefix(const ExprAttrs &Attrs, Position Pos,
         Prefix.front() == '_'))
     return std::nullopt;
 
+  return LineFieldPrefix{
+      .Text = std::move(Prefix), .Begin = PrefixBegin, .Cursor = *Offset};
+}
+
+std::optional<std::string> fieldPrefix(const ExprAttrs &Attrs, Position Pos,
+                                       std::string_view Src) {
+  std::optional<LineFieldPrefix> Line = lineFieldPrefix(Pos, Src);
+  if (!Line)
+    return std::nullopt;
+
   size_t GapBegin = Attrs.lCur().offset();
   if (const Binds *Body = Attrs.binds()) {
     for (const auto &Binding : Body->bindings()) {
@@ -88,18 +109,54 @@ std::optional<std::string> fieldPrefix(const ExprAttrs &Attrs, Position Pos,
       // A non-empty standalone prefix can be part of a malformed binding that
       // swallowed the following line during parser recovery. For a blank
       // prefix, retain the stricter structural check.
-      if (Prefix.empty() && Begin <= *Offset && *Offset <= End)
+      if (Line->Text.empty() && Begin <= Line->Cursor && Line->Cursor <= End)
         return std::nullopt;
-      if (End < PrefixBegin)
+      if (End < Line->Begin)
         GapBegin = std::max(GapBegin, End);
     }
   }
 
-  if (*Offset < GapBegin || *Offset > Src.size())
+  if (Line->Begin < GapBegin || Line->Cursor > Src.size())
     return std::nullopt;
-  if (isInsideComment(Src.substr(GapBegin, PrefixBegin - GapBegin)))
+  if (isInsideComment(Src.substr(GapBegin, Line->Begin - GapBegin)))
     return std::nullopt;
-  return Prefix;
+  return std::move(Line->Text);
+}
+
+bool isModuleResultAttrSet(const ExprAttrs &Attrs,
+                           const ParentMapAnalysis &PM) {
+  const Node *Child = &Attrs;
+  while (!PM.isRoot(*Child)) {
+    const Node *Parent = PM.query(*Child);
+    if (!Parent)
+      return false;
+
+    bool IsResult = false;
+    switch (Parent->kind()) {
+    case Node::NK_ExprParen:
+      IsResult = static_cast<const ExprParen *>(Parent)->expr() == Child;
+      break;
+    case Node::NK_ExprLet:
+      IsResult = static_cast<const ExprLet *>(Parent)->expr() == Child;
+      break;
+    case Node::NK_ExprWith:
+      IsResult = static_cast<const ExprWith *>(Parent)->expr() == Child;
+      break;
+    case Node::NK_ExprAssert:
+      IsResult = static_cast<const ExprAssert *>(Parent)->value() == Child;
+      break;
+    case Node::NK_ExprLambda:
+      IsResult = static_cast<const ExprLambda *>(Parent)->body() == Child &&
+                 PM.isRoot(*Parent);
+      break;
+    default:
+      break;
+    }
+    if (!IsResult)
+      return false;
+    Child = Parent;
+  }
+  return true;
 }
 
 } // namespace
@@ -133,6 +190,41 @@ std::optional<AttrPathCompleteParams> params(const Node &N,
                                 .Prefix = std::move(Prefix)};
 }
 
+std::optional<AttrPathCompleteParams> repairedParams(Position Pos,
+                                                     std::string_view Src) {
+  std::optional<LineFieldPrefix> Prefix = lineFieldPrefix(Pos, Src);
+  if (!Prefix || Prefix->Text.empty())
+    return std::nullopt;
+  if (isInsideComment(Src.substr(0, Prefix->Begin)))
+    return std::nullopt;
+
+  std::string Repaired(Src);
+  Repaired.insert(Prefix->Cursor, " = null;");
+  std::vector<Diagnostic> Diagnostics;
+  std::shared_ptr<Node> AST = parse(Repaired, Diagnostics);
+  if (!AST)
+    return std::nullopt;
+
+  ParentMapAnalysis PM;
+  PM.runOnAST(*AST);
+  const Node *Desc = findCompletionNode(*AST, Repaired, Pos);
+  if (!Desc)
+    return std::nullopt;
+
+  std::optional<AttrPathCompleteParams> Result =
+      params(*Desc, PM, Pos, Repaired);
+  if (!Result)
+    return std::nullopt;
+  if (!Result->Scope.empty())
+    return Result;
+
+  const Node *Expr = PM.upTo(*Desc, Node::NK_ExprAttrs);
+  if (!Expr ||
+      !isModuleResultAttrSet(static_cast<const ExprAttrs &>(*Expr), PM))
+    return std::nullopt;
+  return Result;
+}
+
 } // namespace nixd::completion::options::attr_path
 
 std::optional<AttrPathCompleteParams>
@@ -140,5 +232,8 @@ nixd::completion::optionAttrPathCompletionParams(const Node &N,
                                                  const ParentMapAnalysis &PM,
                                                  Position Pos,
                                                  std::string_view Src) {
-  return options::attr_path::params(N, PM, Pos, Src);
+  if (std::optional<AttrPathCompleteParams> Result =
+          options::attr_path::params(N, PM, Pos, Src))
+    return Result;
+  return options::attr_path::repairedParams(Pos, Src);
 }
