@@ -356,3 +356,19 @@ nixd::findAttrPathForOptions(const nixf::Node &N,
   }
   return R;
 }
+
+nixd::FindAttrPathResult
+nixd::findAttrSetValuePathForOptions(const nixf::ExprAttrs &Attrs,
+                                     const nixf::ParentMapAnalysis &PM,
+                                     std::vector<std::string> &Path) {
+  try {
+    getValueAttrPath(Attrs, PM, Path);
+  } catch (AttrPathHasDynamicError &E) {
+    return FindAttrPathResult::WithDynamic;
+  }
+
+  // Keep this consistent with findAttrPathForOptions.
+  if (!Path.empty() && Path[0] == "config")
+    Path.erase(Path.begin());
+  return FindAttrPathResult::OK;
+}

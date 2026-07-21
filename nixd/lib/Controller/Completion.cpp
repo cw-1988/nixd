@@ -50,13 +50,31 @@ void Controller::onCompletion(const CompletionParams &Params,
         CompletionList List;
         const VariableLookupAnalysis &VLA = *TU->variableLookup();
         try {
-          if (std::optional<OptionValueContext> Context =
-                  findOptionValueContext(N, PM, Pos)) {
+          std::optional<OptionValueContext> ValueContext =
+              findOptionValueContext(N, PM, Pos);
+          if (ValueContext) {
             if (waitForOptionProvidersReadyForTests())
               completion::completeOptionValue(
-                  *Context, resolveDerivedOptionInfos(Context->Scope),
+                  *ValueContext, resolveDerivedOptionInfos(ValueContext->Scope),
                   ClientCaps.CompletionSnippets, nixpkgsClient(), TU->src(),
                   List.items);
+            if (!List.items.empty())
+              return List;
+          }
+
+          if (std::optional<AttrPathCompleteParams> Params =
+                  completion::optionAttrPathCompletionParams(N, PM, Pos,
+                                                             TU->src())) {
+            // An incomplete name immediately before another binding can make
+            // parser recovery attach the cursor to the root attrset. The
+            // enclosing option value still provides the correct schema scope.
+            if (Params->Scope.empty() && ValueContext &&
+                !ValueContext->Scope.empty())
+              Params->Scope = ValueContext->Scope;
+            if (waitForOptionProvidersReadyForTests())
+              completion::completeOptionNames(
+                  completeDerivedOptions(Params->Scope, Params->Prefix),
+                  ClientCaps.CompletionSnippets, List.items);
             if (!List.items.empty())
               return List;
           }
@@ -81,13 +99,6 @@ void Controller::onCompletion(const CompletionParams &Params,
             return List;
           }
           case Node::NK_ExprAttrs: {
-            if (std::optional<AttrPathCompleteParams> Params =
-                    completion::optionAttrPathCompletionParams(N, PM)) {
-              if (waitForOptionProvidersReadyForTests())
-                completion::completeOptionNames(
-                    completeDerivedOptions(Params->Scope, Params->Prefix),
-                    ClientCaps.CompletionSnippets, List.items);
-            }
             return List;
           }
           default:

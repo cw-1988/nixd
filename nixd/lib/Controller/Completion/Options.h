@@ -9,6 +9,7 @@
 
 #include <exception>
 #include <optional>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -38,7 +39,8 @@ inline void addItem(std::vector<lspserver::CompletionItem> &Items,
 
 std::optional<AttrPathCompleteParams>
 optionAttrPathCompletionParams(const nixf::Node &N,
-                               const nixf::ParentMapAnalysis &PM);
+                               const nixf::ParentMapAnalysis &PM,
+                               nixf::Position Pos, std::string_view Src);
 
 void completeOptionNames(const std::vector<ResolvedOptionField> &Fields,
                          bool CompletionSnippets,

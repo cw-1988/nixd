@@ -137,4 +137,13 @@ FindAttrPathResult findAttrPathForOptions(const nixf::Node &N,
                                           const nixf::ParentMapAnalysis &PM,
                                           std::vector<std::string> &Path);
 
+/// \brief Find the option path whose value is \p Attrs.
+///
+/// Unlike findAttrPathForOptions, this does not include a field name from
+/// inside the attribute set. It is used when completing an empty field prefix.
+FindAttrPathResult
+findAttrSetValuePathForOptions(const nixf::ExprAttrs &Attrs,
+                               const nixf::ParentMapAnalysis &PM,
+                               std::vector<std::string> &Path);
+
 } // namespace nixd
