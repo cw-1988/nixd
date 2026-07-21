@@ -73,7 +73,8 @@ void Controller::onCompletion(const CompletionParams &Params,
               Params->Scope = ValueContext->Scope;
             if (waitForOptionProvidersReadyForTests())
               completion::completeOptionNames(
-                  completeDerivedOptions(Params->Scope, Params->Prefix),
+                  completeDerivedOptions(Params->Scope, Params->Prefix,
+                                         /*FullDescriptions=*/false),
                   ClientCaps.CompletionSnippets, List.items);
             if (!List.items.empty())
               return List;

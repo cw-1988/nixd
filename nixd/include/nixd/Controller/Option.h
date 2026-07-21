@@ -134,12 +134,13 @@ public:
 
   std::vector<ResolvedOptionField>
   complete(const std::vector<OptionProviderRef> &Providers,
-           const std::vector<std::string> &Scope, const std::string &Prefix);
+           const std::vector<std::string> &Scope, const std::string &Prefix,
+           bool FullDescriptions = true);
 
   std::vector<ResolvedOptionField>
   completeDerived(const std::vector<OptionProviderRef> &Providers,
                   const std::vector<std::string> &Scope,
-                  const std::string &Prefix);
+                  const std::string &Prefix, bool FullDescriptions = true);
 
   std::vector<ResolvedOptionInfo>
   resolve(const std::vector<OptionProviderRef> &Providers,

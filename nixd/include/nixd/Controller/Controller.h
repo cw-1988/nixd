@@ -285,7 +285,8 @@ private:
                   const std::string &Prefix);
   std::vector<ResolvedOptionField>
   completeDerivedOptions(const std::vector<std::string> &Scope,
-                         const std::string &Prefix);
+                         const std::string &Prefix,
+                         bool FullDescriptions = true);
   std::vector<ResolvedOptionInfo>
   resolveOptionInfos(const std::vector<std::string> &Scope);
   std::vector<ResolvedOptionInfo>

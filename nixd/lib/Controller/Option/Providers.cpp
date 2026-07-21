@@ -254,7 +254,7 @@ OptionService::resolveProviderInfo(const OptionProviderRef &Provider,
 std::vector<ResolvedOptionField>
 OptionService::complete(const std::vector<OptionProviderRef> &Providers,
                         const std::vector<std::string> &Scope,
-                        const std::string &Prefix) {
+                        const std::string &Prefix, bool FullDescriptions) {
   std::vector<ResolvedOptionField> Fields;
   for (const OptionProviderRef &Provider : Providers) {
     if (!Provider.Client)
@@ -272,7 +272,10 @@ OptionService::complete(const std::vector<OptionProviderRef> &Providers,
       State->Ready.release();
     };
 
-    Provider.Client->optionComplete({Scope, Prefix}, std::move(OnReply));
+    Provider.Client->optionComplete({.Scope = Scope,
+                                     .Prefix = Prefix,
+                                     .FullDescriptions = FullDescriptions},
+                                    std::move(OnReply));
     State->Ready.acquire();
 
     for (OptionField &Field : State->Names) {
@@ -288,10 +291,13 @@ OptionService::complete(const std::vector<OptionProviderRef> &Providers,
 std::vector<ResolvedOptionField>
 OptionService::completeDerived(const std::vector<OptionProviderRef> &Providers,
                                const std::vector<std::string> &Scope,
-                               const std::string &Prefix) {
-  std::vector<ResolvedOptionField> Fields = complete(Providers, Scope, Prefix);
+                               const std::string &Prefix,
+                               bool FullDescriptions) {
+  std::vector<ResolvedOptionField> Fields =
+      complete(Providers, Scope, Prefix, FullDescriptions);
   std::vector<ResolvedOptionField> Evidence =
-      Prefix.empty() ? Fields : complete(Providers, Scope, "");
+      Prefix.empty() ? Fields
+                     : complete(Providers, Scope, "", FullDescriptions);
   appendGlobalConfigSettings(Fields, Evidence, Providers, Prefix);
   if (!Fields.empty())
     return Fields;
@@ -471,8 +477,10 @@ Controller::completeOptions(const std::vector<std::string> &Scope,
 
 std::vector<ResolvedOptionField>
 Controller::completeDerivedOptions(const std::vector<std::string> &Scope,
-                                   const std::string &Prefix) {
-  return OptService.completeDerived(optionProviderSnapshot(), Scope, Prefix);
+                                   const std::string &Prefix,
+                                   bool FullDescriptions) {
+  return OptService.completeDerived(optionProviderSnapshot(), Scope, Prefix,
+                                    FullDescriptions);
 }
 
 std::vector<ResolvedOptionInfo>
