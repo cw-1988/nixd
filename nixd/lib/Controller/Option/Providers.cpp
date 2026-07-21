@@ -435,17 +435,46 @@ std::vector<lspserver::Location> OptionService::declarationLocations(
 }
 
 void Controller::noteOptionProviderChanged(std::string_view Name) {
+  std::optional<OptionProviderRef> ChangedProvider;
   {
     std::lock_guard _(OptionsLock);
     std::string ProviderName(Name);
     ReadyOptions.insert(ProviderName);
     SettledOptions.insert(ProviderName);
-    OptionGenerations[std::move(ProviderName)] = NextOptionGeneration++;
+    const std::uint64_t Generation = NextOptionGeneration++;
+    OptionGenerations[ProviderName] = Generation;
+    if (auto It = Options.find(ProviderName);
+        It != Options.end() && It->second && It->second->client()) {
+      ChangedProvider = OptionProviderRef{
+          .Name = std::move(ProviderName),
+          .Client = It->second->client(),
+          .Generation = Generation,
+      };
+    }
   }
   OptService.invalidateProvider(Name);
-  if (!ShuttingDown)
-    postToDiagnosticsPool([this]() { refreshDiagnostics(); });
   OptionsReadyCV.notify_all();
+
+  if (ShuttingDown || !ChangedProvider)
+    return;
+
+  // Populate the common root completion cache before diagnostics can enqueue
+  // expensive metadata requests on the option worker. This runs outside the
+  // LSP input thread, so initialization and unrelated language features remain
+  // responsive while the option provider is warmed.
+  postToPool([this, Provider = std::move(*ChangedProvider)]() mutable {
+    OptService.complete({Provider}, {}, "", /*FullDescriptions=*/false);
+
+    bool IsCurrent = false;
+    {
+      std::lock_guard _(OptionsLock);
+      auto It = OptionGenerations.find(Provider.Name);
+      IsCurrent =
+          It != OptionGenerations.end() && It->second == Provider.Generation;
+    }
+    if (!ShuttingDown && IsCurrent)
+      postToDiagnosticsPool([this]() { refreshDiagnostics(); });
+  });
 }
 
 void Controller::noteOptionProviderSettled(std::string_view Name) {
