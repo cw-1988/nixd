@@ -320,7 +320,15 @@ struct AnalyzedFile {
   std::string Src;
   std::vector<nixf::Diagnostic> Diagnostics;
   std::shared_ptr<Node> AST;
+  std::unique_ptr<VariableLookupAnalysis> VLA;
   ParentMapAnalysis PM;
+};
+
+struct PreviewContext {
+  const std::string &File;
+  llvm::StringRef Src;
+  const VariableLookupAnalysis &VLA;
+  const ParentMapAnalysis &PM;
 };
 
 std::optional<AnalyzedFile> analyzeFile(const std::string &File) {
@@ -337,6 +345,8 @@ std::optional<AnalyzedFile> analyzeFile(const std::string &File) {
     return std::nullopt;
 
   Analyzed.PM.runOnAST(*Analyzed.AST);
+  Analyzed.VLA = std::make_unique<VariableLookupAnalysis>(Analyzed.Diagnostics);
+  Analyzed.VLA->runOnAST(*Analyzed.AST);
   return Analyzed;
 }
 
@@ -348,6 +358,13 @@ std::optional<std::string> importedFile(const Expr &Value,
 
   const auto &Call = static_cast<const ExprCall &>(*E);
   const Expr *Fn = ignoreParens(&Call.fn());
+  if (Fn) {
+    // Support the common `(import ./file.nix) { ... }` shape, parsed as a
+    // call whose callee is itself an import call.
+    if (std::optional<std::string> File = importedFile(*Fn, BaseFile))
+      return File;
+  }
+
   if (!Fn || Fn->kind() != Node::NK_ExprVar)
     return std::nullopt;
 
@@ -367,6 +384,27 @@ std::optional<std::string> importedFile(const Expr &Value,
     return std::nullopt;
 
   return resolveExprPath(BaseFile, Path.parts().literal());
+}
+
+std::optional<const Expr *> resolveExprVar(const Expr &E,
+                                           const VariableLookupAnalysis &VLA,
+                                           const ParentMapAnalysis &PM) {
+  const Expr *Current = ignoreParens(&E);
+  if (!Current || Current->kind() != Node::NK_ExprVar)
+    return std::nullopt;
+
+  const Definition *Def;
+  try {
+    Def = &findDefinition(*Current, PM, VLA);
+  } catch (const std::exception &E) {
+    return std::nullopt;
+  }
+
+  const Expr *Value = definitionValue(*Def, PM);
+  if (!Value)
+    return std::nullopt;
+
+  return Value;
 }
 
 std::optional<std::size_t> selectedAttrPathLength(const ExprSelect &Sel,
@@ -409,9 +447,12 @@ const AttrName *selectedAttrName(const ExprSelect &Sel, const Node &Target,
 
 std::optional<std::string>
 previewAttrPathInExpr(const AttrPath &Path, const Expr &Root,
-                      const ParentMapAnalysis &PM, llvm::StringRef Src,
+                      const PreviewContext &TU,
                       std::optional<std::size_t> Limit,
-                      std::size_t StartIndex = 0) {
+                      std::size_t StartIndex = 0, unsigned Depth = 0) {
+  if (Depth > 8)
+    return std::nullopt;
+
   const Expr *Current = &Root;
   const auto &Names = Path.names();
   const std::size_t EndIndex = Limit.value_or(Names.size());
@@ -420,6 +461,14 @@ previewAttrPathInExpr(const AttrPath &Path, const Expr &Root,
     const auto &Name = Names[Index];
     if (!Name->isStatic())
       return std::nullopt;
+
+    Current = returnedExpr(Current);
+    if (!Current)
+      return std::nullopt;
+
+    if (std::optional<const Expr *> Resolved =
+            resolveExprVar(*Current, TU.VLA, TU.PM))
+      Current = *Resolved;
 
     Current = returnedExpr(Current);
     if (!Current || Current->kind() != Node::NK_ExprAttrs)
@@ -431,23 +480,49 @@ previewAttrPathInExpr(const AttrPath &Path, const Expr &Root,
     if (It == StaticAttrs.end())
       return std::nullopt;
 
-    if (Index == EndIndex - 1)
-      return previewSource(*keyPreviewNode(It->second.key(), PM), Src);
+    if (Index == EndIndex - 1) {
+      if (It->second.fromInherit() && It->second.value()) {
+        if (std::optional<const Expr *> Resolved =
+                resolveExprVar(*It->second.value(), TU.VLA, TU.PM)) {
+          if (const Node *Binding = TU.PM.upTo(**Resolved, Node::NK_Binding))
+            return previewSource(*Binding, TU.Src);
+          return previewSource(**Resolved, TU.Src);
+        }
+      }
+      return previewSource(*keyPreviewNode(It->second.key(), TU.PM), TU.Src);
+    }
 
     Current = It->second.value();
     if (!Current)
       return std::nullopt;
+
+    if (std::optional<const Expr *> Resolved =
+            resolveExprVar(*Current, TU.VLA, TU.PM))
+      Current = *Resolved;
+
+    if (std::optional<std::string> ImportedFile =
+            importedFile(*Current, TU.File)) {
+      std::optional<AnalyzedFile> Imported = analyzeFile(*ImportedFile);
+      if (!Imported)
+        return std::nullopt;
+
+      PreviewContext ImportedContext{Imported->File, Imported->Src,
+                                     *Imported->VLA, Imported->PM};
+      if (std::optional<std::string> Preview = previewAttrPathInExpr(
+              Path, *static_cast<const Expr *>(Imported->AST.get()),
+              ImportedContext, Limit, Index + 1, Depth + 1))
+        return Preview;
+    }
   }
 
   return std::nullopt;
 }
 
-std::optional<std::string> previewImportedSelect(const ExprSelect &Sel,
-                                                 const Definition &Def,
-                                                 const ParentMapAnalysis &PM,
-                                                 llvm::StringRef Src,
-                                                 const std::string &BaseFile,
-                                                 std::size_t Limit) {
+std::optional<std::string>
+previewImportedSelect(const ExprSelect &Sel, const Definition &Def,
+                      const VariableLookupAnalysis &VLA,
+                      const ParentMapAnalysis &PM, llvm::StringRef Src,
+                      const std::string &BaseFile, std::size_t Limit) {
   if (!Sel.path())
     return std::nullopt;
 
@@ -455,17 +530,21 @@ std::optional<std::string> previewImportedSelect(const ExprSelect &Sel,
   if (!Value)
     return std::nullopt;
 
-  if (std::optional<std::string> ImportedPath = importedFile(*Value, BaseFile)) {
+  if (std::optional<std::string> ImportedPath =
+          importedFile(*Value, BaseFile)) {
     std::optional<AnalyzedFile> Imported = analyzeFile(*ImportedPath);
     if (!Imported)
       return std::nullopt;
 
+    PreviewContext ImportedContext{Imported->File, Imported->Src,
+                                   *Imported->VLA, Imported->PM};
     return previewAttrPathInExpr(
         *Sel.path(), *static_cast<const Expr *>(Imported->AST.get()),
-        Imported->PM, Imported->Src, Limit);
+        ImportedContext, Limit);
   }
 
-  return previewAttrPathInExpr(*Sel.path(), *Value, PM, Src, Limit);
+  PreviewContext Current{BaseFile, Src, VLA, PM};
+  return previewAttrPathInExpr(*Sel.path(), *Value, Current, Limit);
 }
 
 std::optional<Hover> hoverStaticPreview(const Node &RangeNode,
@@ -526,7 +605,7 @@ std::optional<Hover> hoverSelectStatic(const ExprSelect &Sel,
       return std::nullopt;
 
     std::optional<std::string> Snippet =
-        previewImportedSelect(Sel, Def, PM, Src, BaseFile, *Limit);
+        previewImportedSelect(Sel, Def, VLA, PM, Src, BaseFile, *Limit);
     if (!Snippet)
       return std::nullopt;
 
