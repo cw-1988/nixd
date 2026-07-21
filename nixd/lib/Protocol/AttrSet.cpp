@@ -232,14 +232,18 @@ bool nixd::fromJSON(const llvm::json::Value &Params, AttrPathInfoResponse &R,
 }
 
 Value nixd::toJSON(const AttrPathCompleteParams &Params) {
-  return Object{{"Scope", Params.Scope}, {"Prefix", Params.Prefix}};
+  Object Result{{"Scope", Params.Scope}, {"Prefix", Params.Prefix}};
+  if (!Params.FullDescriptions)
+    Result["FullDescriptions"] = false;
+  return Result;
 }
 bool nixd::fromJSON(const llvm::json::Value &Params, AttrPathCompleteParams &R,
                     llvm::json::Path P) {
   ObjectMapper O(Params, P);
-  return O                            //
-         && O.map("Scope", R.Scope)   //
-         && O.map("Prefix", R.Prefix) //
+  return O                                                        //
+         && O.map("Scope", R.Scope)                               //
+         && O.map("Prefix", R.Prefix)                             //
+         && O.mapOptional("FullDescriptions", R.FullDescriptions) //
       ;
 }
 

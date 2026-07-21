@@ -88,10 +88,10 @@ public:
         } else {
           Item.detail += "? (missing type)";
         }
-        addItem(Items, std::move(Item));
+        Items.emplace_back(std::move(Item));
       } else {
         Item.kind = OptionAttrKind;
-        addItem(Items, std::move(Item));
+        Items.emplace_back(std::move(Item));
       }
     }
   }

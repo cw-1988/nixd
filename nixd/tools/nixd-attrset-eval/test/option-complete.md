@@ -68,6 +68,38 @@ CHECK-NEXT:   "Name": "binfmtMiscRegistrations"
 ```
 
 ```json
-{"jsonrpc":"2.0","method":"exit"}
+{
+   "jsonrpc":"2.0",
+   "id":2,
+   "method":"attrset/optionComplete",
+   "params": {
+      "Scope": [ "boot" ],
+      "Prefix": "binfmtMiscRegistrations",
+      "FullDescriptions": false
+   }
+}
 ```
 
+```
+     CHECK: "id": 2,
+CHECK-NEXT: "jsonrpc": "2.0",
+CHECK-NEXT: "result": [
+CHECK-NEXT:   {
+CHECK-NEXT:     "Description": {
+CHECK-NEXT:       "Declarations": [],
+CHECK-NEXT:       "Definitions": [],
+CHECK-NEXT:       "Description": "Alias of {option}`boot.binfmt.registrations`.",
+CHECK-NEXT:       "Example": null,
+CHECK-NEXT:       "Type": {
+CHECK-NEXT:         "Description": "attribute set of (submodule)",
+CHECK-NEXT:         "Name": "attrsOf"
+CHECK-NEXT:       }
+CHECK-NEXT:     },
+CHECK-NEXT:     "Name": "binfmtMiscRegistrations"
+CHECK-NEXT:   }
+CHECK-NEXT: ]
+```
+
+```json
+{"jsonrpc":"2.0","method":"exit"}
+```

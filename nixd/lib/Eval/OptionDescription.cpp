@@ -18,7 +18,10 @@ using namespace nixd;
 
 namespace {
 
-constexpr int MaxItems = 30;
+// Describing leaf options can require evaluation. Keep that work bounded while
+// still returning the complete set of cheap, structural namespace entries so
+// the client can filter them locally.
+constexpr int MaxOptions = 30;
 constexpr int MaxOptionTypeDepth = 8;
 constexpr int MaxKnownSubOptions = 64;
 
@@ -520,10 +523,23 @@ void nixd::fillOptionDescription(nix::EvalState &State, nix::Value &V,
   }
 }
 
+static void fillOptionSummary(nix::EvalState &State, nix::Value &V,
+                              OptionDescription &R) {
+  fillString(State, V, {"description"}, R.Description);
+  if (nix::Value *VType = getAttr(State, V, "type")) {
+    OptionType Type;
+    fillString(State, *VType, {"description"}, Type.Description);
+    fillString(State, *VType, {"name"}, Type.Name);
+    R.Type = std::move(Type);
+  }
+}
+
 OptionCompleteResponse nixd::completeOptionsInScope(nix::EvalState &State,
                                                     nix::Value &Scope,
-                                                    std::string_view Prefix) {
+                                                    std::string_view Prefix,
+                                                    bool FullDescriptions) {
   OptionCompleteResponse Response;
+  size_t OptionCount = 0;
 
   for (const auto *AttrPtr : Scope.attrs()->lexicographicOrder(State.symbols)) {
     const nix::Attr &Attr = *AttrPtr;
@@ -535,13 +551,18 @@ OptionCompleteResponse nixd::completeOptionsInScope(nix::EvalState &State,
     OptionField NewField;
     NewField.Name = Name;
     if (nixt::isOption(State, *Attr.value)) {
+      if (OptionCount >= MaxOptions)
+        continue;
+      ++OptionCount;
+
       OptionDescription Desc;
-      fillOptionDescription(State, *Attr.value, Desc);
+      if (FullDescriptions)
+        fillOptionDescription(State, *Attr.value, Desc);
+      else
+        fillOptionSummary(State, *Attr.value, Desc);
       NewField.Description = std::move(Desc);
     }
     Response.emplace_back(std::move(NewField));
-    if (Response.size() >= MaxItems)
-      break;
   }
   return Response;
 }

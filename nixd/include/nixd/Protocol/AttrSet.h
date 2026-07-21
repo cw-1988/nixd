@@ -109,6 +109,9 @@ struct AttrPathCompleteParams {
   Selector Scope;
   /// \brief Search for packages prefixed with this "prefix"
   std::string Prefix;
+  /// \brief Include complete option metadata instead of a shallow summary.
+  /// Ignored by non-option completion providers.
+  bool FullDescriptions = true;
 };
 
 llvm::json::Value toJSON(const AttrPathCompleteParams &Params);

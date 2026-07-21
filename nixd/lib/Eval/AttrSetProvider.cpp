@@ -137,7 +137,8 @@ void AttrSetProvider::onOptionComplete(
       return;
     }
 
-    Reply(completeOptionsInScope(state(), Scope, Params.Prefix));
+    Reply(completeOptionsInScope(state(), Scope, Params.Prefix,
+                                 Params.FullDescriptions));
     return;
   } catch (const nix::BaseError &Err) {
     Reply(error(Err.info().msg.str()));

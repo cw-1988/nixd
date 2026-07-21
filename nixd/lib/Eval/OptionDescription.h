@@ -13,6 +13,7 @@ void fillOptionDescription(nix::EvalState &State, nix::Value &V,
 
 OptionCompleteResponse completeOptionsInScope(nix::EvalState &State,
                                               nix::Value &Scope,
-                                              std::string_view Prefix);
+                                              std::string_view Prefix,
+                                              bool FullDescriptions);
 
 } // namespace nixd
