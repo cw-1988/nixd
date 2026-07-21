@@ -28,9 +28,11 @@ struct OptionDiagnosticContext {
   struct FieldCacheKey {
     std::vector<std::string> Scope;
     std::string Prefix;
+    bool FullDescriptions = true;
 
     bool operator<(const FieldCacheKey &Other) const {
-      return std::tie(Scope, Prefix) < std::tie(Other.Scope, Other.Prefix);
+      return std::tie(Scope, Prefix, FullDescriptions) <
+             std::tie(Other.Scope, Other.Prefix, Other.FullDescriptions);
     }
   };
 
@@ -39,6 +41,9 @@ struct OptionDiagnosticContext {
   size_t Queries = 0;
   bool QueryLimitReached = false;
 };
+
+using CompleteOptions = std::function<std::vector<ResolvedOptionField>(
+    const std::vector<std::string> &, const std::string &, bool)>;
 
 std::vector<ResolvedOptionInfo>
 resolveCached(OptionDiagnosticContext &Context,
@@ -57,12 +62,15 @@ resolveCached(OptionDiagnosticContext &Context,
   return It->second;
 }
 
-std::vector<ResolvedOptionField> completeCached(
-    OptionDiagnosticContext &Context, const std::vector<std::string> &Scope,
-    const std::string &Prefix,
-    const std::function<std::vector<ResolvedOptionField>(
-        const std::vector<std::string> &, const std::string &)> &Complete) {
-  OptionDiagnosticContext::FieldCacheKey Key{.Scope = Scope, .Prefix = Prefix};
+std::vector<ResolvedOptionField>
+completeCached(OptionDiagnosticContext &Context,
+               const std::vector<std::string> &Scope, const std::string &Prefix,
+               bool FullDescriptions, const CompleteOptions &Complete) {
+  OptionDiagnosticContext::FieldCacheKey Key{
+      .Scope = Scope,
+      .Prefix = Prefix,
+      .FullDescriptions = FullDescriptions,
+  };
   auto [It, Inserted] = Context.FieldCache.try_emplace(Key);
   if (Inserted) {
     if (Context.Queries >= MaxOptionDiagnosticQueries) {
@@ -70,7 +78,7 @@ std::vector<ResolvedOptionField> completeCached(
       return {};
     }
     ++Context.Queries;
-    It->second = Complete(Scope, Prefix);
+    It->second = Complete(Scope, Prefix, FullDescriptions);
   }
   return It->second;
 }
@@ -213,23 +221,20 @@ bool hasFunctionHelperExport(const ExprAttrs &Attrs) {
   return false;
 }
 
-bool isKnownRootOptionField(
-    std::string_view Name, OptionDiagnosticContext &Context,
-    const std::function<std::vector<ResolvedOptionField>(
-        const std::vector<std::string> &, const std::string &)> &Complete) {
+bool isKnownRootOptionField(std::string_view Name,
+                            OptionDiagnosticContext &Context,
+                            const CompleteOptions &Complete) {
   std::vector<ResolvedOptionField> Fields =
-      completeCached(Context, {}, "", Complete);
+      completeCached(Context, {}, "", /*FullDescriptions=*/false, Complete);
   for (const ResolvedOptionField &Field : Fields)
     if (Field.Field.Name == Name)
       return true;
   return false;
 }
 
-bool isHelperLibraryExport(
-    const Binding &Binding, const ParentMapAnalysis &PM,
-    OptionDiagnosticContext &Context,
-    const std::function<std::vector<ResolvedOptionField>(
-        const std::vector<std::string> &, const std::string &)> &Complete) {
+bool isHelperLibraryExport(const Binding &Binding, const ParentMapAnalysis &PM,
+                           OptionDiagnosticContext &Context,
+                           const CompleteOptions &Complete) {
   std::optional<std::string> Name = singleStaticBindingName(Binding);
   if (!Name)
     return false;
@@ -287,17 +292,16 @@ bool isListContainerType(const OptionType &Type) {
   return false;
 }
 
-bool parentFieldHasDynamicAttrCoverage(
-    OptionDiagnosticContext &Context, const std::vector<std::string> &Scope,
-    const std::function<std::vector<ResolvedOptionField>(
-        const std::vector<std::string> &, const std::string &)> &Complete) {
+bool parentFieldHasDynamicAttrCoverage(OptionDiagnosticContext &Context,
+                                       const std::vector<std::string> &Scope,
+                                       const CompleteOptions &Complete) {
   if (Scope.empty())
     return false;
 
   std::vector<std::string> Parent(Scope.begin(), Scope.end() - 1);
   const std::string &Leaf = Scope.back();
-  for (const ResolvedOptionField &Field :
-       completeCached(Context, Parent, Leaf, Complete)) {
+  for (const ResolvedOptionField &Field : completeCached(
+           Context, Parent, Leaf, /*FullDescriptions=*/true, Complete)) {
     if (Field.Field.Name != Leaf || !Field.Field.Description ||
         !Field.Field.Description->Type)
       continue;
@@ -308,13 +312,13 @@ bool parentFieldHasDynamicAttrCoverage(
   return false;
 }
 
-std::optional<NixdDiagnostic> validateKnownOptionPath(
-    const Binding &Binding, const ParentMapAnalysis &PM,
-    const std::vector<std::string> &Scope, OptionDiagnosticContext &Context,
-    const std::function<std::vector<ResolvedOptionInfo>(
-        const std::vector<std::string> &)> &Resolve,
-    const std::function<std::vector<ResolvedOptionField>(
-        const std::vector<std::string> &, const std::string &)> &Complete) {
+std::optional<NixdDiagnostic>
+validateKnownOptionPath(const Binding &Binding, const ParentMapAnalysis &PM,
+                        const std::vector<std::string> &Scope,
+                        OptionDiagnosticContext &Context,
+                        const std::function<std::vector<ResolvedOptionInfo>(
+                            const std::vector<std::string> &)> &Resolve,
+                        const CompleteOptions &Complete) {
   if (Scope.empty() || isModuleImportKey(Scope.back()) ||
       hasUnsafeAncestorAttrs(Binding, PM))
     return std::nullopt;
@@ -363,15 +367,16 @@ std::optional<NixdDiagnostic> validateKnownOptionPath(
     return std::nullopt;
 
   std::vector<ResolvedOptionField> ExactFields =
-      completeCached(Context, ParentScope, Leaf, Complete);
+      completeCached(Context, ParentScope, Leaf,
+                     /*FullDescriptions=*/false, Complete);
   if (Context.QueryLimitReached)
     return std::nullopt;
   for (const ResolvedOptionField &Field : ExactFields)
     if (Field.Field.Name == Leaf)
       return std::nullopt;
 
-  std::vector<ResolvedOptionField> SiblingFields =
-      completeCached(Context, ParentScope, "", Complete);
+  std::vector<ResolvedOptionField> SiblingFields = completeCached(
+      Context, ParentScope, "", /*FullDescriptions=*/false, Complete);
   if (Context.QueryLimitReached)
     return std::nullopt;
   if (SiblingFields.empty() && !HasClosedParentType)
@@ -383,13 +388,13 @@ std::optional<NixdDiagnostic> validateKnownOptionPath(
   return makeUnknownDiagnostic(Binding.path(), Scope);
 }
 
-std::vector<NixdDiagnostic> validateOptionBinding(
-    const Binding &Binding, const ParentMapAnalysis &PM,
-    const VariableLookupAnalysis *VLA, OptionDiagnosticContext &Context,
-    const std::function<std::vector<ResolvedOptionInfo>(
-        const std::vector<std::string> &)> &Resolve,
-    const std::function<std::vector<ResolvedOptionField>(
-        const std::vector<std::string> &, const std::string &)> &Complete) {
+std::vector<NixdDiagnostic>
+validateOptionBinding(const Binding &Binding, const ParentMapAnalysis &PM,
+                      const VariableLookupAnalysis *VLA,
+                      OptionDiagnosticContext &Context,
+                      const std::function<std::vector<ResolvedOptionInfo>(
+                          const std::vector<std::string> &)> &Resolve,
+                      const CompleteOptions &Complete) {
   const auto &Value = Binding.value();
   if (!Value)
     return {};
@@ -444,9 +449,7 @@ void collectOptionDiagnosticsFromNode(
     const VariableLookupAnalysis *VLA, OptionDiagnosticContext &Context,
     const std::function<std::vector<ResolvedOptionInfo>(
         const std::vector<std::string> &)> &Resolve,
-    const std::function<std::vector<ResolvedOptionField>(
-        const std::vector<std::string> &, const std::string &)> &Complete,
-    std::unordered_set<const Node *> &Seen,
+    const CompleteOptions &Complete, std::unordered_set<const Node *> &Seen,
     std::vector<NixdDiagnostic> &Diagnostics) {
   if (!Seen.insert(&Desc).second)
     return;
@@ -518,8 +521,8 @@ Controller::collectOptionDiagnostics(const NixTU &TU) {
     return resolveDerivedOptionInfos(Scope);
   };
   auto Complete = [this](const std::vector<std::string> &Scope,
-                         const std::string &Prefix) {
-    return completeDerivedOptions(Scope, Prefix);
+                         const std::string &Prefix, bool FullDescriptions) {
+    return completeDerivedOptions(Scope, Prefix, FullDescriptions);
   };
   std::unordered_set<const Node *> Seen;
   collectOptionDiagnosticsFromNode(*TU.ast(), *TU.parentMap(),
