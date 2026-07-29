@@ -42,6 +42,15 @@ std::string escapeCharacters(const std::set<char> &Charset,
 class Provider {
   bool ClientSupportSnippet;
 
+  static std::string resolveData(const ResolvedOptionField &Resolved,
+                                 const std::vector<std::string> &Scope) {
+    return llvm::formatv("{0}", llvm::json::Value(llvm::json::Object{
+                                    {"Kind", "option"},
+                                    {"Provider", Resolved.ProviderName},
+                                    {"Scope", Scope},
+                                }));
+  }
+
   void fillInsertText(CompletionItem &Item, const std::string &Name,
                       const OptionDescription &Desc) const {
     std::string Example = Desc.Example.value_or("");
@@ -64,6 +73,7 @@ public:
       : ClientSupportSnippet(ClientSupportSnippet) {}
 
   void complete(const std::vector<ResolvedOptionField> &Fields,
+                const std::vector<std::string> &Scope,
                 std::vector<CompletionItem> &Items) {
     for (const ResolvedOptionField &Resolved : Fields) {
       const nixd::OptionField &Field = Resolved.Field;
@@ -74,6 +84,7 @@ public:
 
       if (Field.Description) {
         const OptionDescription &Desc = *Field.Description;
+        Item.data = resolveData(Resolved, Scope);
         Item.kind = OptionKind;
         fillInsertText(Item, Field.Name, Desc);
         Item.documentation = MarkupContent{
@@ -100,15 +111,17 @@ public:
 } // namespace
 
 void complete(const std::vector<ResolvedOptionField> &Fields,
-              bool CompletionSnippets, std::vector<CompletionItem> &List) {
+              const std::vector<std::string> &Scope, bool CompletionSnippets,
+              std::vector<CompletionItem> &List) {
   Provider OCP(CompletionSnippets);
-  OCP.complete(Fields, List);
+  OCP.complete(Fields, Scope, List);
 }
 
 } // namespace nixd::completion::options::names
 
 void nixd::completion::completeOptionNames(
-    const std::vector<ResolvedOptionField> &Fields, bool CompletionSnippets,
+    const std::vector<ResolvedOptionField> &Fields,
+    const std::vector<std::string> &Scope, bool CompletionSnippets,
     std::vector<CompletionItem> &List) {
-  options::names::complete(Fields, CompletionSnippets, List);
+  options::names::complete(Fields, Scope, CompletionSnippets, List);
 }

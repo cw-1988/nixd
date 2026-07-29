@@ -52,7 +52,7 @@ CHECK-NEXT:  "result": {
 CHECK-NEXT:    "isIncomplete": false,
 CHECK-NEXT:    "items": [
 CHECK-NEXT:      {
-CHECK-NEXT:        "data": "",
+CHECK-NEXT:        "data": "{\"Kind\":\"option\",\"Provider\":\"nixos\",\"Scope\":[\"services\",\"k3s\"]}",
 CHECK-NEXT:        "detail": "nixos | bool ()",
 CHECK-NEXT:        "documentation": null,
 CHECK-NEXT:        "insertText": "enable = true;",

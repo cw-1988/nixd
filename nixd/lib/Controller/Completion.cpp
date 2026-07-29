@@ -92,7 +92,7 @@ void Controller::onCompletion(const CompletionParams &Params,
               completion::completeOptionNames(
                   completeDerivedOptions(Params->Scope, Params->Prefix,
                                          /*FullDescriptions=*/false),
-                  ClientCaps.CompletionSnippets, List.items);
+                  Params->Scope, ClientCaps.CompletionSnippets, List.items);
             if (!List.items.empty())
               return List;
           }
@@ -140,7 +140,7 @@ void Controller::onCompletionItemResolve(const CompletionItem &Params,
       Reply(Params);
       return;
     }
-    AttrPathCompleteParams Req;
+
     auto EV = llvm::json::parse(Params.data);
     if (!EV) {
       // If the json value cannot be parsed, this is very unlikely to happen.
@@ -148,6 +148,46 @@ void Controller::onCompletionItemResolve(const CompletionItem &Params,
       return;
     }
 
+    if (const llvm::json::Object *Object = EV->getAsObject();
+        Object && Object->getString("Kind") == "option") {
+      std::string ProviderName;
+      std::vector<std::string> Scope;
+      llvm::json::Path::Root Root;
+      llvm::json::ObjectMapper Mapper(*EV, Root);
+      if (!Mapper || !Mapper.map("Provider", ProviderName) ||
+          !Mapper.map("Scope", Scope)) {
+        Reply(Params);
+        return;
+      }
+
+      std::vector<ResolvedOptionField> Fields =
+          completeOptions(Scope, Params.label);
+      if (Fields.empty())
+        Fields = completeDerivedOptions(Scope, Params.label,
+                                        /*FullDescriptions=*/true);
+
+      for (const ResolvedOptionField &Resolved : Fields) {
+        if (Resolved.ProviderName == ProviderName &&
+            Resolved.Field.Name == Params.label) {
+          std::vector<CompletionItem> Items;
+          completion::completeOptionNames({Resolved}, Scope,
+                                          ClientCaps.CompletionSnippets, Items);
+          if (Items.empty())
+            break;
+
+          CompletionItem Resp = Params;
+          Resp.detail = std::move(Items.front().detail);
+          Resp.documentation = std::move(Items.front().documentation);
+          Reply(std::move(Resp));
+          return;
+        }
+      }
+
+      Reply(Params);
+      return;
+    }
+
+    AttrPathCompleteParams Req;
     llvm::json::Path::Root Root;
     fromJSON(*EV, Req, Root);
 

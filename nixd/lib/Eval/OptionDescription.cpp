@@ -19,9 +19,9 @@ using namespace nixd;
 namespace {
 
 // Describing leaf options can require evaluation. Keep that work bounded while
-// still returning the complete set of cheap, structural namespace entries so
-// the client can filter them locally.
-constexpr int MaxOptions = 30;
+// still returning every cheap option name and structural namespace entry so
+// the client can filter them locally and resolve focused items lazily.
+constexpr int MaxDescribedOptions = 30;
 constexpr int MaxOptionTypeDepth = 8;
 constexpr int MaxKnownSubOptions = 64;
 
@@ -551,15 +551,14 @@ OptionCompleteResponse nixd::completeOptionsInScope(nix::EvalState &State,
     OptionField NewField;
     NewField.Name = Name;
     if (nixt::isOption(State, *Attr.value)) {
-      if (OptionCount >= MaxOptions)
-        continue;
-      ++OptionCount;
-
       OptionDescription Desc;
-      if (FullDescriptions)
-        fillOptionDescription(State, *Attr.value, Desc);
-      else
-        fillOptionSummary(State, *Attr.value, Desc);
+      if (OptionCount < MaxDescribedOptions) {
+        ++OptionCount;
+        if (FullDescriptions)
+          fillOptionDescription(State, *Attr.value, Desc);
+        else
+          fillOptionSummary(State, *Attr.value, Desc);
+      }
       NewField.Description = std::move(Desc);
     }
     Response.emplace_back(std::move(NewField));

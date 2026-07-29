@@ -61,7 +61,7 @@ CHECK-NEXT:  "result": {
 CHECK-NEXT:    "isIncomplete": false,
 CHECK-NEXT:    "items": [
 CHECK-NEXT:      {
-CHECK-NEXT:        "data": "",
+CHECK-NEXT:        "data": "{\"Kind\":\"option\",\"Provider\":\"nixos\",\"Scope\":[\"foo\"]}",
 CHECK-NEXT:        "detail": "nixos | ? (missing type)",
 CHECK-NEXT:        "documentation": null,
 CHECK-NEXT:        "insertText": "bar = ${1:};",

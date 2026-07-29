@@ -43,13 +43,14 @@ optionAttrPathCompletionParams(const nixf::Node &N,
                                nixf::Position Pos, std::string_view Src);
 
 void completeOptionNames(const std::vector<ResolvedOptionField> &Fields,
+                         const std::vector<std::string> &Scope,
                          bool CompletionSnippets,
                          std::vector<lspserver::CompletionItem> &List);
 
 void completeOptionValue(const OptionValueContext &Context,
                          const std::vector<ResolvedOptionInfo> &Infos,
-                         bool CompletionSnippets,
-                         AttrSetClient *NixpkgsClient, llvm::StringRef Src,
+                         bool CompletionSnippets, AttrSetClient *NixpkgsClient,
+                         llvm::StringRef Src,
                          std::vector<lspserver::CompletionItem> &Items);
 
 } // namespace nixd::completion
