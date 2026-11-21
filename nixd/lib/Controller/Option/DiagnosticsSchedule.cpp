@@ -1,7 +1,10 @@
+#include "../FlakeDiagnostics.h"
+
 #include "nixd/Controller/Controller.h"
 
 #include <boost/asio/post.hpp>
 
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -11,22 +14,30 @@
 
 using namespace nixd;
 
+std::vector<NixdDiagnostic>
+Controller::collectNixdDiagnostics(lspserver::PathRef File, const NixTU &TU) {
+  std::vector<NixdDiagnostic> Diagnostics = collectFlakeDiagnostics(File, TU);
+  std::vector<NixdDiagnostic> Options = collectOptionDiagnostics(TU);
+  std::move(Options.begin(), Options.end(), std::back_inserter(Diagnostics));
+  return Diagnostics;
+}
+
 void Controller::scheduleOptionDiagnostics(lspserver::PathRef File,
                                            std::optional<int64_t> Version,
                                            std::shared_ptr<NixTU> TU) {
-  postToDiagnosticsPool(
-      [this, File = File.str(), Version, TU = std::move(TU)]() mutable {
-        std::vector<NixdDiagnostic> Diagnostics = collectOptionDiagnostics(*TU);
-        {
-          std::lock_guard _(TUsLock);
-          auto It = TUs.find(File);
-          if (It == TUs.end() || It->second != TU)
-            return;
-          TU->setNixdDiagnostics(std::move(Diagnostics));
-        }
-        publishDiagnostics(File, Version, TU->src(), TU->diagnostics(),
-                           TU->nixdDiagnostics());
-      });
+  postToDiagnosticsPool([this, File = File.str(), Version,
+                         TU = std::move(TU)]() mutable {
+    std::vector<NixdDiagnostic> Diagnostics = collectNixdDiagnostics(File, *TU);
+    {
+      std::lock_guard _(TUsLock);
+      auto It = TUs.find(File);
+      if (It == TUs.end() || It->second != TU)
+        return;
+      TU->setNixdDiagnostics(std::move(Diagnostics));
+    }
+    publishDiagnostics(File, Version, TU->src(), TU->diagnostics(),
+                       TU->nixdDiagnostics());
+  });
 }
 
 void Controller::refreshDiagnostics() {
@@ -39,7 +50,7 @@ void Controller::refreshDiagnostics() {
   }
 
   for (const auto &[File, TU] : Snapshot) {
-    std::vector<NixdDiagnostic> Diagnostics = collectOptionDiagnostics(*TU);
+    std::vector<NixdDiagnostic> Diagnostics = collectNixdDiagnostics(File, *TU);
     {
       std::lock_guard _(TUsLock);
       auto It = TUs.find(File);

@@ -76,4 +76,11 @@ public:
   [[nodiscard]] std::string_view src() const { return *Src; }
 };
 
+/// \brief Determine whether \p TU failed to parse cleanly.
+///
+/// Semantic diagnostics are suppressed while the source is syntactically
+/// broken: the recovered AST is a guess, so anything derived from it is mostly
+/// noise while the user is still typing.
+bool hasRecoverySyntaxError(const NixTU &TU);
+
 } // namespace nixd

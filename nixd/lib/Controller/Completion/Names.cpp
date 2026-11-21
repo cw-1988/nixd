@@ -1,9 +1,9 @@
 #include "Controller/Completion/Options.h"
+#include "Controller/Completion/Snippet.h"
 
 #include <llvm/Support/FormatVariadic.h>
 
 #include <optional>
-#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -22,21 +22,6 @@ bool isBooleanOption(const OptionDescription &Desc) {
     return false;
   const std::optional<ParsedOptionType> Parsed = parseOptionType(*Desc.Type);
   return Parsed && Parsed->acceptsBoolean();
-}
-
-std::string escapeCharacters(const std::set<char> &Charset,
-                             const std::string &Origin) {
-  std::string Ret;
-  Ret.reserve(Origin.size());
-  for (const auto Ch : Origin) {
-    if (Charset.contains(Ch)) {
-      Ret += "\\";
-      Ret += Ch;
-    } else {
-      Ret += Ch;
-    }
-  }
-  return Ret;
 }
 
 class Provider {
@@ -63,9 +48,8 @@ class Provider {
       return;
     }
     Item.insertTextFormat = InsertTextFormat::Snippet;
-    Item.insertText = Name + " = " +
-                      "${1:" + escapeCharacters({'\\', '$', '}'}, Example) +
-                      "}" + ";";
+    Item.insertText =
+        Name + " = " + "${1:" + escapeSnippet(Example) + "}" + ";";
   }
 
 public:

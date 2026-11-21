@@ -1,3 +1,4 @@
+#include "Controller/Completion/Snippet.h"
 #include "Controller/Completion/Value.h"
 
 #include <optional>
@@ -39,17 +40,6 @@ std::string placeholderForType(const OptionType &Type) {
   return "\"\"";
 }
 
-std::string escape(std::string_view Text) {
-  std::string Out;
-  Out.reserve(Text.size());
-  for (char C : Text) {
-    if (C == '\\' || C == '$' || C == '}')
-      Out.push_back('\\');
-    Out.push_back(C);
-  }
-  return Out;
-}
-
 std::optional<std::string> submoduleSnippet(const OptionType &Type,
                                             bool Snippets) {
   if (!option_navigation::isSubmoduleLike(Type))
@@ -73,7 +63,8 @@ std::optional<std::string> submoduleSnippet(const OptionType &Type,
     std::string Placeholder = placeholderForType(Child);
     Text += "  " + Name + " = ";
     if (Snippets)
-      Text += "${" + std::to_string(Index++) + ":" + escape(Placeholder) + "}";
+      Text += "${" + std::to_string(Index++) + ":" +
+              escapeSnippet(Placeholder) + "}";
     else
       Text += Placeholder;
     Text += ";\n";

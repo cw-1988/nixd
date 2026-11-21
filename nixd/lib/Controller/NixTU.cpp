@@ -16,3 +16,18 @@ NixTU::NixTU(std::vector<nixf::Diagnostic> Diagnostics,
     PMA->runOnAST(*this->AST);
   }
 }
+
+bool nixd::hasRecoverySyntaxError(const NixTU &TU) {
+  for (const nixf::Diagnostic &Diagnostic : TU.diagnostics()) {
+    const nixf::Diagnostic::Severity Severity =
+        nixf::Diagnostic::severity(Diagnostic.kind());
+    if (Severity == nixf::Diagnostic::DS_Fatal)
+      return true;
+
+    const std::string_view Name = nixf::Diagnostic::sname(Diagnostic.kind());
+    if (Severity <= nixf::Diagnostic::DS_Error &&
+        (Name.starts_with("parse-") || Name.starts_with("lex-")))
+      return true;
+  }
+  return false;
+}

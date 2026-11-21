@@ -487,21 +487,6 @@ std::vector<NixdDiagnostic> dedupeDiagnostics(std::vector<NixdDiagnostic> In) {
   return Out;
 }
 
-bool hasRecoverySyntaxError(const NixTU &TU) {
-  for (const nixf::Diagnostic &Diagnostic : TU.diagnostics()) {
-    const nixf::Diagnostic::Severity Severity =
-        nixf::Diagnostic::severity(Diagnostic.kind());
-    if (Severity == nixf::Diagnostic::DS_Fatal)
-      return true;
-
-    const std::string_view Name = nixf::Diagnostic::sname(Diagnostic.kind());
-    if (Severity <= nixf::Diagnostic::DS_Error &&
-        (Name.starts_with("parse-") || Name.starts_with("lex-")))
-      return true;
-  }
-  return false;
-}
-
 } // namespace
 
 std::vector<NixdDiagnostic>

@@ -5,11 +5,13 @@
 
 #include "CheckReturn.h"
 #include "Completion/Context.h"
+#include "Completion/Flake.h"
 #include "Completion/Nixpkgs.h"
 #include "Completion/Options.h"
 #include "Completion/Select.h"
 #include "Completion/Variables.h"
 #include "Convert.h"
+#include "Flake.h"
 
 #include "lspserver/Protocol.h"
 
@@ -77,6 +79,15 @@ void Controller::onCompletion(const CompletionParams &Params,
           if (std::optional<AttrPathCompleteParams> Params =
                   completion::optionAttrPathCompletionParams(N, PM, Pos,
                                                              TU->src())) {
+            // The flake root is a closed schema of four attributes, so NixOS
+            // options have no business being offered there. Return whatever
+            // it yields, including nothing, rather than falling through.
+            if (Params->Scope.empty() && isFlakeFile(File) &&
+                isInFlakeRootAttrs(N, *AST, PM)) {
+              completion::completeFlakeRootNames(
+                  Params->Prefix, ClientCaps.CompletionSnippets, List.items);
+              return List;
+            }
             // An incomplete name immediately before another binding can make
             // parser recovery attach the cursor to the root attrset. Borrow
             // the enclosing option scope only when its value starts directly

@@ -1,5 +1,7 @@
-#include "nixd/Controller/Controller.h"
+#include "FlakeDiagnostics.h"
+
 #include "nixd/CommandLine/Options.h"
+#include "nixd/Controller/Controller.h"
 
 #include <nixf/Basic/Diagnostic.h>
 #include <nixf/Parse/Parser.h>
@@ -98,6 +100,9 @@ void Controller::actOnDocumentAdd(PathRef File,
 
     auto TU = std::make_shared<NixTU>(std::move(Diagnostics), std::move(AST),
                                       std::nullopt, std::move(VLA), Src);
+    // Flake diagnostics are purely syntactic, so publish them with the first
+    // round instead of making them wait on the option providers.
+    TU->setNixdDiagnostics(collectFlakeDiagnostics(File, *TU));
     publishDiagnostics(File, Version, *Src, TU->diagnostics(),
                        TU->nixdDiagnostics());
 

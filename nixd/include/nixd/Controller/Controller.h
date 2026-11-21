@@ -294,6 +294,10 @@ private:
   std::vector<lspserver::Location>
   optionDeclarationLocations(const std::vector<std::string> &Scope);
   std::vector<NixdDiagnostic> collectOptionDiagnostics(const NixTU &TU);
+
+  /// \brief All nixd-provided diagnostics for \p File: flake and option checks.
+  std::vector<NixdDiagnostic> collectNixdDiagnostics(lspserver::PathRef File,
+                                                     const NixTU &TU);
   void scheduleOptionDiagnostics(lspserver::PathRef File,
                                  std::optional<int64_t> Version,
                                  std::shared_ptr<NixTU> TU);
